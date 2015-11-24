@@ -38,7 +38,6 @@ extern crate rustc;
 
 use self::PatternBindingMode::*;
 use self::Namespace::*;
-use self::NamespaceResult::*;
 use self::ResolveResult::*;
 use self::FallbackSuggestion::*;
 use self::TypeParameters::*;
@@ -503,38 +502,6 @@ pub enum Namespace {
     ValueNS,
 }
 
-/// A NamespaceResult represents the result of resolving an import in
-/// a particular namespace. The result is either definitely-resolved,
-/// definitely- unresolved, or unknown.
-#[derive(Clone)]
-enum NamespaceResult {
-    /// Means that resolve hasn't gathered enough information yet to determine
-    /// whether the name is bound in this namespace. (That is, it hasn't
-    /// resolved all `use` directives yet.)
-    UnknownResult,
-    /// Means that resolve has determined that the name is definitely
-    /// not bound in the namespace.
-    UnboundResult,
-    /// Means that resolve has determined that the name is bound in the Module
-    /// argument, and specified by the NameBinding argument.
-    BoundResult(Rc<Module>, NsDef),
-}
-
-impl NamespaceResult {
-    fn is_unknown(&self) -> bool {
-        match *self {
-            UnknownResult => true,
-            _ => false,
-        }
-    }
-    fn is_unbound(&self) -> bool {
-        match *self {
-            UnboundResult => true,
-            _ => false,
-        }
-    }
-}
-
 impl<'a, 'v, 'tcx> Visitor<'v> for Resolver<'a, 'tcx> {
     fn visit_nested_item(&mut self, item: hir::ItemId) {
         self.visit_item(self.ast_map.expect_item(item.id))
@@ -628,6 +595,7 @@ impl<'a, 'v, 'tcx> Visitor<'v> for Resolver<'a, 'tcx> {
 
 type ErrorMessage = Option<(Span, String)>;
 
+#[derive(Clone)]
 enum ResolveResult<T> {
     Failed(ErrorMessage), // Failed to resolve the name, optional helpful error message.
     Indeterminate, // Couldn't determine due to unresolved globs.
@@ -638,6 +606,13 @@ impl<T> ResolveResult<T> {
     fn success(&self) -> bool {
         match *self {
             Success(_) => true,
+            _ => false,
+        }
+    }
+
+    fn failed(&self) -> bool {
+        match *self {
+            Failed(_) => true,
             _ => false,
         }
     }
@@ -1341,28 +1316,29 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                 // There was no prefix, so we're considering the first element
                 // of the path. How we handle this depends on whether we were
                 // instructed to use lexical scope or not.
-                match use_lexical_scope {
-                    DontUseLexicalScope => {
-                        // This is a crate-relative path. We will start the
-                        // resolution process at index zero.
-                        search_module = self.graph_root.clone();
-                        start_index = 0;
-                        last_private = LastMod(AllPublic);
-                    }
-                    UseLexicalScope => {
-                        // This is not a crate-relative path. We resolve the
-                        // first component of the path in the current lexical
-                        // scope and then proceed to resolve below that.
-                        match self.resolve_module_in_lexical_scope(module_, module_path[0]) {
-                            Failed(err) => return Failed(err),
-                            Indeterminate => {
-                                debug!("(resolving module path for import) indeterminate; bailing");
-                                return Indeterminate;
-                            }
-                            Success(containing_module) => {
+                if let DontUseLexicalScope = use_lexical_scope {
+                    // This is a crate-relative path. We will start the
+                    // resolution process at index zero.
+                    search_module = self.graph_root.clone();
+                    start_index = 0;
+                    last_private = LastMod(AllPublic);
+                } else {
+                    // This is not a crate-relative path. We resolve the
+                    // first component of the path in the current lexical
+                    // scope and then proceed to resolve below that.
+                    match self.resolve_item_in_lexical_scope(module_, module_path[0], TypeNS) {
+                        Failed(err) => return Failed(err),
+                        Indeterminate => {
+                            debug!("(resolving module path for import) indeterminate; bailing");
+                            return Indeterminate;
+                        }
+                        Success((target, _)) => {
+                            if let Some(containing_module) = target.ns_def.module() {
                                 search_module = containing_module;
                                 start_index = 1;
                                 last_private = LastMod(AllPublic);
+                            } else {
+                                return Failed(None);
                             }
                         }
                     }
@@ -1489,35 +1465,6 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                     debug!("(resolving item in lexical scope) found name in module, done");
                     return Success((target, used_reexport));
                 }
-            }
-        }
-    }
-
-    /// Resolves a module name in the current lexical scope.
-    fn resolve_module_in_lexical_scope(&mut self,
-                                       module_: Rc<Module>,
-                                       name: Name)
-                                       -> ResolveResult<Rc<Module>> {
-        // If this module is an anonymous module, resolve the item in the
-        // lexical scope. Otherwise, resolve the item from the crate root.
-        let resolve_result = self.resolve_item_in_lexical_scope(module_, name, TypeNS);
-        match resolve_result {
-            Success((target, _)) => {
-                if let Some(module_def) = target.ns_def.module() {
-                    return Success(module_def)
-                } else {
-                    debug!("!!! (resolving module in lexical scope) module \
-                            wasn't actually a module!");
-                    return Failed(None);
-                }
-            }
-            Indeterminate => {
-                debug!("(resolving module in lexical scope) indeterminate; bailing");
-                return Indeterminate;
-            }
-            Failed(err) => {
-                debug!("(resolving module in lexical scope) failed to resolve");
-                return Failed(err);
             }
         }
     }

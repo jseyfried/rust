@@ -14,10 +14,9 @@ use DefModifiers;
 use Module;
 use Namespace::{self, TypeNS, ValueNS};
 use NsDef;
-use NamespaceResult::{BoundResult, UnboundResult, UnknownResult};
-use NamespaceResult;
 use NameSearchType;
 use ResolveResult;
+use ResolveResult::*;
 use Resolver;
 use UseLexicalScopeFlag;
 use {names_to_string, module_to_string};
@@ -420,29 +419,11 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                              directive: &ImportDirective,
                              lp: LastPrivate)
                              -> ResolveResult<()> {
-        debug!("(resolving single import) resolving `{}` = `{}::{}` from `{}` id {}, last \
-                private {:?}",
-               target,
-               module_to_string(&*target_module),
-               source,
-               module_to_string(module_),
-               directive.id,
-               lp);
-
-        let lp = match lp {
-            LastMod(lp) => lp,
-            LastImport {..} => {
-                self.resolver
-                    .session
-                    .span_bug(directive.span, "not expecting Import here, must be LastMod")
-            }
-        };
+        let lp = match lp { LastMod(lp) => lp, LastImport {..} => panic!() };
 
         // We need to resolve both namespaces for this to succeed.
-        //
-
-        let mut value_result = UnknownResult;
-        let mut type_result = UnknownResult;
+        let mut value_result: ResolveResult<(Rc<Module>, NsDef)> = Indeterminate;
+        let mut type_result: ResolveResult<(Rc<Module>, NsDef)> = Indeterminate;
 
         // Search for direct children of the containing module.
         build_reduced_graph::populate_module_if_necessary(self.resolver, &target_module);
@@ -452,7 +433,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
 
         if let Some(ns_def) = target_module.get_child(source, ValueNS) {
             debug!("(resolving single import) found value binding");
-            value_result = BoundResult(target_module.clone(), ns_def.clone());
+            value_result = Success((target_module.clone(), ns_def.clone()));
             if directive.is_public && !ns_def.is_public() {
                 let msg = format!("`{}` is private, and cannot be reexported", source);
                 let note_msg = format!("Consider marking `{}` as `pub` in the imported \
@@ -464,9 +445,10 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             }
         }
 
+
         if let Some(ns_def) = target_module.get_child(source, TypeNS) {
             debug!("(resolving single import) found type binding");
-            type_result = BoundResult(target_module.clone(), ns_def.clone());
+            type_result = Success((target_module.clone(), ns_def.clone()));
             if !pub_err && directive.is_public && !ns_def.is_public() {
                 let msg = format!("`{}` is private, and cannot be reexported", source);
                 let note_msg = format!("Consider declaring module `{}` as a `pub mod`",
@@ -481,7 +463,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         let mut value_used_reexport = false;
         let mut type_used_reexport = false;
         match (value_result.clone(), type_result.clone()) {
-            (BoundResult(..), BoundResult(..)) => {} // Continue.
+            (Success(..), Success(..)) => {} // Continue.
             _ => {
                 // If there is an unresolved glob at this point in the
                 // containing module, bail out. We don't know enough to be
@@ -501,11 +483,11 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                         // therefore accurately report that the names are
                         // unbound.
 
-                        if value_result.is_unknown() {
-                            value_result = UnboundResult;
+                        if let Indeterminate = value_result {
+                            value_result = Failed(None);
                         }
-                        if type_result.is_unknown() {
-                            type_result = UnboundResult;
+                        if let Indeterminate = type_result {
+                            type_result = Failed(None);
                         }
                     }
                     Some(import_resolution) if import_resolution.outstanding_references == 0 => {
@@ -514,17 +496,16 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                        import_resolution: &ImportResolution,
                                        namespace: Namespace,
                                        source: Name)
-                                       -> NamespaceResult {
-
+                                       -> ResolveResult<(Rc<Module>, NsDef)> {
                             // Import resolutions must be declared with "pub"
                             // in order to be exported.
                             if !import_resolution[namespace].is_public {
-                                return UnboundResult;
+                                return Failed(None);
                             }
 
                             match import_resolution.target_for_namespace(namespace) {
                                 None => {
-                                    return UnboundResult;
+                                    return Failed(None);
                                 }
                                 Some(Target {
                                     target_module,
@@ -543,21 +524,21 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                         }
                                         _ => {}
                                     }
-                                    return BoundResult(target_module, ns_def);
+                                    return Success((target_module, ns_def));
                                 }
                             }
                         }
 
                         // The name is an import which has been fully
                         // resolved. We can, therefore, just follow it.
-                        if value_result.is_unknown() {
+                        if let Indeterminate = value_result {
                             value_result = get_binding(self.resolver,
                                                        import_resolution,
                                                        ValueNS,
                                                        source);
                             value_used_reexport = import_resolution.value_ns.is_public;
                         }
-                        if type_result.is_unknown() {
+                        if let Indeterminate = type_result {
                             type_result = get_binding(self.resolver,
                                                       import_resolution,
                                                       TypeNS,
@@ -581,11 +562,11 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                         // the conflict
                         match (module_.def_id(), target_module.def_id()) {
                             (Some(id1), Some(id2)) if id1 == id2 => {
-                                if value_result.is_unknown() {
-                                    value_result = UnboundResult;
+                                if let Indeterminate = value_result {
+                                    value_result = Failed(None);
                                 }
-                                if type_result.is_unknown() {
-                                    type_result = UnboundResult;
+                                if let Indeterminate = type_result {
+                                    type_result = Failed(None);
                                 }
                             }
                             _ => {
@@ -605,7 +586,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         // If we didn't find a result in the type namespace, search the
         // external modules.
         match type_result {
-            BoundResult(..) => {}
+            Success(..) => {}
             _ => {
                 match target_module.external_module_children.borrow_mut().get(&source).cloned() {
                     None => {} // Continue.
@@ -619,7 +600,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                             _ => {}
                         }
                         let ns_def = NsDef::create_from_module(module, None);
-                        type_result = BoundResult(target_module.clone(), ns_def);
+                        type_result = Success((target_module.clone(), ns_def));
                         type_used_public = true;
                     }
                 }
@@ -631,14 +612,14 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         let import_resolution = import_resolutions.get_mut(&target).unwrap();
 
         {
-            let mut check_and_write_import = |namespace, result: &_, used_public: &mut bool| {
+            let mut check_and_write_import = |namespace, result: &ResolveResult<(Rc<Module>, NsDef)>, used_public: &mut bool| {
                 let namespace_name = match namespace {
                     TypeNS => "type",
                     ValueNS => "value",
                 };
 
                 match *result {
-                    BoundResult(ref target_module, ref ns_def) => {
+                    Success((ref target_module, ref ns_def)) => {
                         debug!("(resolving single import) found {:?} target: {:?}",
                                namespace_name,
                                ns_def.def());
@@ -660,10 +641,10 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                         };
                         *used_public = ns_def.is_public();
                     }
-                    UnboundResult => {
+                    Failed(_) => {
                         // Continue.
                     }
-                    UnknownResult => {
+                    Indeterminate => {
                         panic!("{:?} result should be known at this point", namespace_name);
                     }
                 }
@@ -678,7 +659,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             check_and_write_import(TypeNS, &type_result, &mut type_used_public);
         }
 
-        if value_result.is_unbound() && type_result.is_unbound() {
+        if value_result.failed() && type_result.failed() {
             let msg = format!("There is no `{}` in `{}`",
                               source,
                               module_to_string(&target_module));
