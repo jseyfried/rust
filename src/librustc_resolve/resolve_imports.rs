@@ -13,7 +13,7 @@ use self::ImportDirectiveSubclass::*;
 use DefModifiers;
 use Module;
 use Namespace::{self, TypeNS, ValueNS};
-use {NameBindings, NameBinding};
+use NsDef;
 use NamespaceResult::{BoundResult, UnboundResult, UnknownResult};
 use NamespaceResult;
 use NameSearchType;
@@ -85,18 +85,15 @@ impl ImportDirective {
 #[derive(Clone,Debug)]
 pub struct Target {
     pub target_module: Rc<Module>,
-    pub binding: NameBinding,
+    pub ns_def: NsDef,
     pub shadowable: Shadowable,
 }
 
 impl Target {
-    pub fn new(target_module: Rc<Module>,
-               binding: NameBinding,
-               shadowable: Shadowable)
-               -> Target {
+    pub fn new(target_module: Rc<Module>, ns_def: NsDef, shadowable: Shadowable) -> Target {
         Target {
             target_module: target_module,
-            binding: binding,
+            ns_def: ns_def,
             shadowable: shadowable,
         }
     }
@@ -253,7 +250,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
 
         build_reduced_graph::populate_module_if_necessary(self.resolver, &module_);
         for (_, child_node) in module_.children.borrow().iter() {
-            match child_node.type_ns.module() {
+            match child_node.module() {
                 None => {
                     // Nothing to do.
                 }
@@ -450,40 +447,32 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         // Search for direct children of the containing module.
         build_reduced_graph::populate_module_if_necessary(self.resolver, &target_module);
 
-        match target_module.children.borrow().get(&source) {
-            None => {
-                // Continue.
+        // pub_err makes sure we don't give the same error twice.
+        let mut pub_err = false;
+
+        if let Some(ns_def) = target_module.get_child(source, ValueNS) {
+            debug!("(resolving single import) found value binding");
+            value_result = BoundResult(target_module.clone(), ns_def.clone());
+            if directive.is_public && !ns_def.is_public() {
+                let msg = format!("`{}` is private, and cannot be reexported", source);
+                let note_msg = format!("Consider marking `{}` as `pub` in the imported \
+                                        module",
+                                        source);
+                span_err!(self.resolver.session, directive.span, E0364, "{}", &msg);
+                self.resolver.session.span_note(directive.span, &note_msg);
+                pub_err = true;
             }
-            Some(ref child_name_bindings) => {
-                // pub_err makes sure we don't give the same error twice.
-                let mut pub_err = false;
-                if child_name_bindings.value_ns.defined() {
-                    debug!("(resolving single import) found value binding");
-                    value_result = BoundResult(target_module.clone(),
-                                               child_name_bindings.value_ns.clone());
-                    if directive.is_public && !child_name_bindings.value_ns.is_public() {
-                        let msg = format!("`{}` is private, and cannot be reexported", source);
-                        let note_msg = format!("Consider marking `{}` as `pub` in the imported \
-                                                module",
-                                               source);
-                        span_err!(self.resolver.session, directive.span, E0364, "{}", &msg);
-                        self.resolver.session.span_note(directive.span, &note_msg);
-                        pub_err = true;
-                    }
-                }
-                if child_name_bindings.type_ns.defined() {
-                    debug!("(resolving single import) found type binding");
-                    type_result = BoundResult(target_module.clone(),
-                                              child_name_bindings.type_ns.clone());
-                    if !pub_err && directive.is_public &&
-                       !child_name_bindings.type_ns.is_public() {
-                        let msg = format!("`{}` is private, and cannot be reexported", source);
-                        let note_msg = format!("Consider declaring module `{}` as a `pub mod`",
-                                               source);
-                        span_err!(self.resolver.session, directive.span, E0365, "{}", &msg);
-                        self.resolver.session.span_note(directive.span, &note_msg);
-                    }
-                }
+        }
+
+        if let Some(ns_def) = target_module.get_child(source, TypeNS) {
+            debug!("(resolving single import) found type binding");
+            type_result = BoundResult(target_module.clone(), ns_def.clone());
+            if !pub_err && directive.is_public && !ns_def.is_public() {
+                let msg = format!("`{}` is private, and cannot be reexported", source);
+                let note_msg = format!("Consider declaring module `{}` as a `pub mod`",
+                                       source);
+                span_err!(self.resolver.session, directive.span, E0365, "{}", &msg);
+                self.resolver.session.span_note(directive.span, &note_msg);
             }
         }
 
@@ -539,7 +528,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                 }
                                 Some(Target {
                                     target_module,
-                                    binding,
+                                    ns_def,
                                     shadowable: _
                                 }) => {
                                     debug!("(resolving single import) found import in ns {:?}",
@@ -554,7 +543,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                         }
                                         _ => {}
                                     }
-                                    return BoundResult(target_module, binding);
+                                    return BoundResult(target_module, ns_def);
                                 }
                             }
                         }
@@ -629,8 +618,8 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                             }
                             _ => {}
                         }
-                        let name_binding = NameBinding::create_from_module(module);
-                        type_result = BoundResult(target_module.clone(), name_binding);
+                        let ns_def = NsDef::create_from_module(module, None);
+                        type_result = BoundResult(target_module.clone(), ns_def);
                         type_used_public = true;
                     }
                 }
@@ -649,27 +638,27 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                 };
 
                 match *result {
-                    BoundResult(ref target_module, ref name_binding) => {
+                    BoundResult(ref target_module, ref ns_def) => {
                         debug!("(resolving single import) found {:?} target: {:?}",
                                namespace_name,
-                               name_binding.def());
+                               ns_def.def());
                         self.check_for_conflicting_import(&import_resolution,
                                                           directive.span,
                                                           target,
                                                           namespace);
 
-                        self.check_that_import_is_importable(&name_binding,
+                        self.check_that_import_is_importable(ns_def,
                                                              directive.span,
                                                              target);
 
                         import_resolution[namespace] = ImportResolution_ {
                             target: Some(Target::new(target_module.clone(),
-                                                     name_binding.clone(),
+                                                     ns_def.clone(),
                                                      directive.shadowable)),
                             id: directive.id,
                             is_public: directive.is_public
                         };
-                        *used_public = name_binding.is_public();
+                        *used_public = ns_def.is_public();
                     }
                     UnboundResult => {
                         // Continue.
@@ -678,15 +667,16 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                         panic!("{:?} result should be known at this point", namespace_name);
                     }
                 }
+
+                self.check_for_conflicts_between_imports_and_items(module_,
+                                                                   import_resolution,
+                                                                   directive.span,
+                                                                   (target, namespace));
+
             };
             check_and_write_import(ValueNS, &value_result, &mut value_used_public);
             check_and_write_import(TypeNS, &type_result, &mut type_used_public);
         }
-
-        self.check_for_conflicts_between_imports_and_items(module_,
-                                                           import_resolution,
-                                                           directive.span,
-                                                           target);
 
         if value_result.is_unbound() && type_result.is_unbound() {
             let msg = format!("There is no `{}` in `{}`",
@@ -704,7 +694,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         // this may resolve to either a value or a type, but for documentation
         // purposes it's good enough to just favor one over the other.
         let value_def_and_priv = import_resolution.value_ns.target.as_ref().map(|target| {
-            let def = target.binding.def().unwrap();
+            let def = target.ns_def.def().unwrap();
             (def,
              if value_used_public {
                 lp
@@ -713,7 +703,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             })
         });
         let type_def_and_priv = import_resolution.type_ns.target.as_ref().map(|target| {
-            let def = target.binding.def().unwrap();
+            let def = target.ns_def.def().unwrap();
             (def,
              if type_used_public {
                 lp
@@ -826,12 +816,12 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         // Add all children from the containing module.
         build_reduced_graph::populate_module_if_necessary(self.resolver, &target_module);
 
-        for (&name, name_bindings) in target_module.children.borrow().iter() {
+        for (&name, ns_def) in target_module.children.borrow().iter() {
             self.merge_import_resolution(module_,
                                          target_module.clone(),
                                          import_directive,
                                          name,
-                                         name_bindings.clone());
+                                         ns_def.clone());
 
         }
 
@@ -840,8 +830,8 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             self.merge_import_resolution(module_,
                                          target_module.clone(),
                                          import_directive,
-                                         name,
-                                         NameBindings::create_from_module(module.clone()));
+                                         (name, TypeNS),
+                                         NsDef::create_from_module(module.clone(), None));
         }
 
         // Record the destination of this import
@@ -862,8 +852,8 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                module_: &Module,
                                containing_module: Rc<Module>,
                                import_directive: &ImportDirective,
-                               name: Name,
-                               name_bindings: NameBindings) {
+                               (name, namespace): (Name, Namespace),
+                               ns_def: NsDef) {
         let id = import_directive.id;
         let is_public = import_directive.is_public;
 
@@ -879,41 +869,39 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                module_to_string(module_));
 
         // Merge the child item into the import resolution.
-        for &namespace in [TypeNS, ValueNS].iter() {
-            let modifier = DefModifiers::IMPORTABLE | DefModifiers::PUBLIC;
+        let modifier = DefModifiers::IMPORTABLE | DefModifiers::PUBLIC;
 
-            if name_bindings[namespace].defined_with(modifier) {
-                let namespace_name = match namespace {
-                    TypeNS => "type",
-                    ValueNS => "value",
+        if ns_def.defined_with(modifier) {
+            let namespace_name = match namespace {
+                TypeNS => "type",
+                ValueNS => "value",
+            };
+            debug!("(resolving glob import) ... for {} target", namespace_name);
+            if dest_import_resolution.shadowable(namespace) == Shadowable::Never {
+                let msg = format!("a {} named `{}` has already been imported in this \
+                                   module",
+                                 namespace_name,
+                                 name);
+               span_err!(self.resolver.session,
+                         import_directive.span,
+                         E0251,
+                         "{}",
+                        msg);
+           } else {
+                dest_import_resolution[namespace] = ImportResolution_ {
+                    target: Some(Target::new(containing_module.clone(),
+                                             ns_def.clone(),
+                                             import_directive.shadowable)),
+                    id: id,
+                    is_public: is_public
                 };
-                debug!("(resolving glob import) ... for {} target", namespace_name);
-                if dest_import_resolution.shadowable(namespace) == Shadowable::Never {
-                    let msg = format!("a {} named `{}` has already been imported in this \
-                                       module",
-                                      namespace_name,
-                                      name);
-                    span_err!(self.resolver.session,
-                              import_directive.span,
-                              E0251,
-                              "{}",
-                              msg);
-                } else {
-                    dest_import_resolution[namespace] = ImportResolution_ {
-                        target: Some(Target::new(containing_module.clone(),
-                                                 name_bindings[namespace].clone(),
-                                                 import_directive.shadowable)),
-                        id: id,
-                        is_public: is_public
-                    };
-                }
             }
         }
 
         self.check_for_conflicts_between_imports_and_items(module_,
                                                            dest_import_resolution,
                                                            import_directive.span,
-                                                           name);
+                                                           (name, namespace));
     }
 
     /// Checks that imported names and items don't have the same name.
@@ -931,7 +919,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             Some(ref target) if target.shadowable != Shadowable::Always => {
                 let ns_word = match namespace {
                     TypeNS => {
-                        match target.binding.module() {
+                        match target.ns_def.module() {
                             Some(ref module) if module.is_normal() => "module",
                             Some(ref module) if module.is_trait() => "trait",
                             _ => "type",
@@ -959,10 +947,10 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
 
     /// Checks that an import is actually importable
     fn check_that_import_is_importable(&mut self,
-                                       name_binding: &NameBinding,
+                                       ns_def: &NsDef,
                                        import_span: Span,
                                        name: Name) {
-        if !name_binding.defined_with(DefModifiers::IMPORTABLE) {
+        if !ns_def.defined_with(DefModifiers::IMPORTABLE) {
             let msg = format!("`{}` is not directly importable", name);
             span_err!(self.resolver.session, import_span, E0253, "{}", &msg[..]);
         }
@@ -973,52 +961,49 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                                      module: &Module,
                                                      import_resolution: &ImportResolution,
                                                      import_span: Span,
-                                                     name: Name) {
+                                                     (name, ns): (Name, Namespace)) {
         // First, check for conflicts between imports and `extern crate`s.
-        if module.external_module_children
-                 .borrow()
-                 .contains_key(&name) {
-            match import_resolution.type_ns.target {
-                Some(ref target) if target.shadowable != Shadowable::Always => {
-                    let msg = format!("import `{0}` conflicts with imported crate in this module \
-                                       (maybe you meant `use {0}::*`?)",
-                                      name);
-                    span_err!(self.resolver.session, import_span, E0254, "{}", &msg[..]);
+        if let TypeNS = ns {
+            if module.external_module_children.borrow().contains_key(&name) {
+                match import_resolution.type_ns.target {
+                    Some(ref target) if target.shadowable != Shadowable::Always => {
+                        let msg = format!("import `{0}` conflicts with imported crate \
+                                           in this module (maybe you meant `use {0}::*`?)",
+                                          name);
+                        span_err!(self.resolver.session, import_span, E0254, "{}", &msg[..]);
+                    }
+                    Some(_) | None => {}
                 }
-                Some(_) | None => {}
             }
         }
 
         // Check for item conflicts.
-        let children = module.children.borrow();
-        let name_bindings = match children.get(&name) {
+        let ns_def = match module.get_child(name, ns) {
             None => {
                 // There can't be any conflicts.
                 return;
             }
-            Some(ref name_bindings) => (*name_bindings).clone(),
+            Some(ns_def) => ns_def,
         };
 
-        match import_resolution.value_ns.target {
-            Some(ref target) if target.shadowable != Shadowable::Always => {
-                if let Some(ref value) = *name_bindings.value_ns.borrow() {
+        if let ValueNS = ns {
+            match import_resolution.value_ns.target {
+                Some(ref target) if target.shadowable != Shadowable::Always => {
                     span_err!(self.resolver.session,
                               import_span,
                               E0255,
                               "import `{}` conflicts with value in this module",
                               name);
-                    if let Some(span) = value.span {
+                    if let Some(span) = ns_def.span {
                         self.resolver.session.span_note(span, "conflicting value here");
                     }
                 }
+                Some(_) | None => {}
             }
-            Some(_) | None => {}
-        }
-
-        match import_resolution.type_ns.target {
-            Some(ref target) if target.shadowable != Shadowable::Always => {
-                if let Some(ref ty) = *name_bindings.type_ns.borrow() {
-                    let (what, note) = match ty.module() {
+        } else {
+            match import_resolution.type_ns.target {
+                Some(ref target) if target.shadowable != Shadowable::Always => {
+                    let (what, note) = match ns_def.module() {
                         Some(ref module) if module.is_normal() =>
                             ("existing submodule", "note conflicting module here"),
                         Some(ref module) if module.is_trait() =>
@@ -1031,12 +1016,12 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                               "import `{}` conflicts with {}",
                               name,
                               what);
-                    if let Some(span) = ty.span {
+                    if let Some(span) = ns_def.span {
                         self.resolver.session.span_note(span, note);
                     }
                 }
+                Some(_) | None => {}
             }
-            Some(_) | None => {}
         }
     }
 }

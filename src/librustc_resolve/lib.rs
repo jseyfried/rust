@@ -92,7 +92,7 @@ use rustc_front::hir::{TraitRef, Ty, TyBool, TyChar, TyFloat, TyInt};
 use rustc_front::hir::{TyRptr, TyStr, TyUint, TyPath, TyPtr};
 use rustc_front::util::walk_pat;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map, HashMap, HashSet};
 use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::mem::replace;
@@ -517,7 +517,7 @@ enum NamespaceResult {
     UnboundResult,
     /// Means that resolve has determined that the name is bound in the Module
     /// argument, and specified by the NameBinding argument.
-    BoundResult(Rc<Module>, NameBinding),
+    BoundResult(Rc<Module>, NsDef),
 }
 
 impl NamespaceResult {
@@ -772,7 +772,7 @@ pub struct Module {
     def: Cell<Option<Def>>,
     is_public: bool,
 
-    children: RefCell<HashMap<Name, NameBindings>>,
+    children: RefCell<HashMap<(Name, Namespace), NsDef>>,
     imports: RefCell<Vec<ImportDirective>>,
 
     // The external module children of this node that were declared with
@@ -837,6 +837,17 @@ impl Module {
             resolved_import_count: Cell::new(0),
             populated: Cell::new(!external),
         })
+    }
+
+    fn get_child(&self, name: Name, ns: Namespace) -> Option<NsDef> {
+        self.children.borrow().get(&(name, ns)).cloned()
+    }
+
+    fn try_define_child(&self, name: Name, ns: Namespace, ns_def: NsDef) -> bool {
+        match self.children.borrow_mut().entry((name, ns)) {
+            hash_map::Entry::Vacant(entry) => { entry.insert(ns_def); true }
+            hash_map::Entry::Occupied(_) => false,
+        }
     }
 
     fn def_id(&self) -> Option<DefId> {
@@ -913,14 +924,14 @@ bitflags! {
 }
 
 // Records a possibly-private value, type, or module definition.
-#[derive(Debug)]
-struct NsDef {
+#[derive(Clone, Debug)]
+pub struct NsDef {
     modifiers: DefModifiers, // see note in ImportResolution about how to use this
     def_or_module: DefOrModule,
     span: Option<Span>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum DefOrModule {
     Def(Def),
     Module(Rc<Module>),
@@ -954,55 +965,9 @@ impl NsDef {
             DefOrModule::Module(ref module) => module.def.get(),
         }
     }
-}
-
-// Records at most one definition that a name in a namespace is bound to
-#[derive(Clone,Debug)]
-pub struct NameBinding(Rc<RefCell<Option<NsDef>>>);
-
-impl NameBinding {
-    fn new() -> Self {
-        NameBinding(Rc::new(RefCell::new(None)))
-    }
-
-    fn create_from_module(module: Rc<Module>) -> Self {
-        NameBinding(Rc::new(RefCell::new(Some(NsDef::create_from_module(module, None)))))
-    }
-
-    fn set(&self, ns_def: NsDef) {
-        *self.0.borrow_mut() = Some(ns_def);
-    }
-
-    fn set_modifiers(&self, modifiers: DefModifiers) {
-        if let Some(ref mut ns_def) = *self.0.borrow_mut() {
-            ns_def.modifiers = modifiers
-        }
-    }
-
-    fn borrow(&self) -> ::std::cell::Ref<Option<NsDef>> {
-        self.0.borrow()
-    }
-
-    // Lifted versions of the NsDef methods and fields
-    fn def(&self) -> Option<Def> {
-        self.borrow().as_ref().and_then(NsDef::def)
-    }
-    fn module(&self) -> Option<Rc<Module>> {
-        self.borrow().as_ref().and_then(NsDef::module)
-    }
-    fn span(&self) -> Option<Span> {
-        self.borrow().as_ref().and_then(|def| def.span)
-    }
-    fn modifiers(&self) -> Option<DefModifiers> {
-        self.borrow().as_ref().and_then(|def| Some(def.modifiers))
-    }
-
-    fn defined(&self) -> bool {
-        self.borrow().is_some()
-    }
 
     fn defined_with(&self, modifiers: DefModifiers) -> bool {
-        self.modifiers().map(|m| m.contains(modifiers)).unwrap_or(false)
+        self.modifiers.contains(modifiers)
     }
 
     fn is_public(&self) -> bool {
@@ -1012,54 +977,6 @@ impl NameBinding {
     fn def_and_lp(&self) -> (Def, LastPrivate) {
         let def = self.def().unwrap();
         (def, LastMod(if self.is_public() { AllPublic } else { DependsOn(def.def_id()) }))
-    }
-}
-
-// Records the definitions (at most one for each namespace) that a name is
-// bound to.
-#[derive(Clone,Debug)]
-pub struct NameBindings {
-    type_ns: NameBinding, // < Meaning in type namespace.
-    value_ns: NameBinding, // < Meaning in value namespace.
-}
-
-impl ::std::ops::Index<Namespace> for NameBindings {
-    type Output = NameBinding;
-    fn index(&self, namespace: Namespace) -> &NameBinding {
-        match namespace { TypeNS => &self.type_ns, ValueNS => &self.value_ns }
-    }
-}
-
-impl NameBindings {
-    fn new() -> NameBindings {
-        NameBindings {
-            type_ns: NameBinding::new(),
-            value_ns: NameBinding::new(),
-        }
-    }
-
-    fn create_from_module(module: Rc<Module>) -> NameBindings {
-        NameBindings {
-            type_ns: NameBinding::create_from_module(module),
-            value_ns: NameBinding::new(),
-        }
-    }
-
-    /// Creates a new module in this set of name bindings.
-    fn define_module(&self, module: Rc<Module>, sp: Span) {
-        self.type_ns.set(NsDef::create_from_module(module, Some(sp)));
-    }
-
-    /// Records a type definition.
-    fn define_type(&self, def: Def, sp: Span, modifiers: DefModifiers) {
-        debug!("defining type for def {:?} with modifiers {:?}", def, modifiers);
-        self.type_ns.set(NsDef::create_from_def(def, modifiers, Some(sp)));
-    }
-
-    /// Records a value definition.
-    fn define_value(&self, def: Def, sp: Span, modifiers: DefModifiers) {
-        debug!("defining value for def {:?} with modifiers {:?}", def, modifiers);
-        self.value_ns.set(NsDef::create_from_def(def, modifiers, Some(sp)));
     }
 }
 
@@ -1344,7 +1261,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                 Success((target, used_proxy)) => {
                     // Check to see whether there are type bindings, and, if
                     // so, whether there is a module within.
-                    if let Some(module_def) = target.binding.module() {
+                    if let Some(module_def) = target.ns_def.module() {
                         // track extern crates for unused_extern_crate lint
                         if let Some(did) = module_def.def_id() {
                             self.used_crates.insert(did.krate);
@@ -1483,17 +1400,9 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         // its immediate children.
         build_reduced_graph::populate_module_if_necessary(self, &module_);
 
-        match module_.children.borrow().get(&name) {
-            Some(name_bindings) if name_bindings[namespace].defined() => {
-                debug!("top name bindings succeeded");
-                return Success((Target::new(module_.clone(),
-                                            name_bindings[namespace].clone(),
-                                            Shadowable::Never),
-                                false));
-            }
-            Some(_) | None => {
-                // Not found; continue.
-            }
+        if let Some(ns_def) = module_.get_child(name, namespace) {
+            debug!("top name bindings succeeded");
+            return Success((Target::new(module_.clone(), ns_def, Shadowable::Never), false));
         }
 
         // Now check for its import directives. We don't have to have resolved
@@ -1527,10 +1436,9 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             // FIXME (21114): In principle unclear `child` *has* to be lifted.
             let child = module_.external_module_children.borrow().get(&name).cloned();
             if let Some(module) = child {
-                let name_binding = NameBinding::create_from_module(module);
+                let ns_def = NsDef::create_from_module(module, None);
                 debug!("lower name bindings succeeded");
-                return Success((Target::new(module_, name_binding, Shadowable::Never),
-                                false));
+                return Success((Target::new(module_, ns_def, Shadowable::Never), false));
             }
         }
 
@@ -1595,7 +1503,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         let resolve_result = self.resolve_item_in_lexical_scope(module_, name, TypeNS);
         match resolve_result {
             Success((target, _)) => {
-                if let Some(module_def) = target.binding.module() {
+                if let Some(module_def) = target.ns_def.module() {
                     return Success(module_def)
                 } else {
                     debug!("!!! (resolving module in lexical scope) module \
@@ -1699,17 +1607,9 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         // First, check the direct children of the module.
         build_reduced_graph::populate_module_if_necessary(self, &module_);
 
-        match module_.children.borrow().get(&name) {
-            Some(name_bindings) if name_bindings[namespace].defined() => {
-                debug!("(resolving name in module) found node as child");
-                return Success((Target::new(module_.clone(),
-                                            name_bindings[namespace].clone(),
-                                            Shadowable::Never),
-                                false));
-            }
-            Some(_) | None => {
-                // Continue.
-            }
+        if let Some(ns_def) = module_.get_child(name, namespace) {
+            debug!("(resolving name in module) found node as child");
+            return Success((Target::new(module_.clone(), ns_def, Shadowable::Never), false));
         }
 
         // Next, check the module's imports if necessary.
@@ -1756,9 +1656,8 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             // FIXME (21114): In principle unclear `child` *has* to be lifted.
             let child = module_.external_module_children.borrow().get(&name).cloned();
             if let Some(module) = child {
-                let name_binding = NameBinding::create_from_module(module);
-                return Success((Target::new(module_, name_binding, Shadowable::Never),
-                                false));
+                let ns_def = NsDef::create_from_module(module, None);
+                return Success((Target::new(module_, ns_def, Shadowable::Never), false));
             }
         }
 
@@ -1781,7 +1680,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         build_reduced_graph::populate_module_if_necessary(self, &module_);
 
         for (_, child_node) in module_.children.borrow().iter() {
-            match child_node.type_ns.module() {
+            match child_node.module() {
                 None => {
                     // Continue.
                 }
@@ -1827,14 +1726,14 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             Some(name) => {
                 build_reduced_graph::populate_module_if_necessary(self, &orig_module);
 
-                match orig_module.children.borrow().get(&name) {
+                match orig_module.get_child(name, TypeNS) {
                     None => {
                         debug!("!!! (with scope) didn't find `{}` in `{}`",
                                name,
                                module_to_string(&*orig_module));
                     }
-                    Some(name_bindings) => {
-                        match name_bindings.type_ns.module() {
+                    Some(ns_def) => {
+                        match ns_def.module() {
                             None => {
                                 debug!("!!! (with scope) didn't find module for `{}` in `{}`",
                                        name,
@@ -2789,8 +2688,8 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             Success((target, _)) => {
                 debug!("(resolve bare identifier pattern) succeeded in finding {} at {:?}",
                        name,
-                       target.binding.borrow());
-                match target.binding.def() {
+                       &target.ns_def);
+                match target.ns_def.def() {
                     None => {
                         panic!("resolved name in the value namespace to a set of name bindings \
                                 with no def?!");
@@ -3079,8 +2978,8 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                                                     namespace,
                                                     NameSearchType::PathSearch,
                                                     false) {
-            Success((Target { binding, .. }, _)) => {
-                let (def, lp) = binding.def_and_lp();
+            Success((Target { ns_def, .. }, _)) => {
+                let (def, lp) = ns_def.def_and_lp();
                 (def, last_private.or(lp))
             }
             _ => return None,
@@ -3145,8 +3044,8 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                                           namespace,
                                           NameSearchType::PathSearch,
                                           false) {
-            Success((Target { binding, .. }, _)) => {
-                let (def, lp) = binding.def_and_lp();
+            Success((Target { ns_def, .. }, _)) => {
+                let (def, lp) = ns_def.def_and_lp();
                 Some((def, last_private.or(lp)))
             }
             _ => None,
@@ -3197,7 +3096,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         let module = self.current_module.clone();
         match self.resolve_item_in_lexical_scope(module, name, namespace) {
             Success((target, _)) => {
-                match target.binding.def() {
+                match target.ns_def.def() {
                     None => {
                         // This can happen if we were looking for a type and
                         // found a module instead. Modules don't have defs.
@@ -3266,12 +3165,9 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             if name_path.len() == 1 {
                 match this.primitive_type_table.primitive_types.get(last_name) {
                     Some(_) => None,
-                    None => {
-                        match this.current_module.children.borrow().get(last_name) {
-                            Some(child) => child.type_ns.module(),
-                            None => None,
-                        }
-                    }
+                    None => this.current_module.get_child(*last_name, TypeNS)
+                                               .as_ref()
+                                               .and_then(NsDef::module)
                 }
             } else {
                 match this.resolve_module_path(root,
@@ -3333,8 +3229,8 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
         // Look for a method in the current self type's impl module.
         if let Some(module) = get_module(self, path.span, &name_path) {
-            if let Some(binding) = module.children.borrow().get(&name) {
-                if let Some(DefMethod(did)) = binding.value_ns.def() {
+            if let Some(ns_def) = module.get_child(name, ValueNS) {
+                if let Some(DefMethod(did)) = ns_def.def() {
                     if is_static_method(self, did) {
                         return StaticMethod(path_names_to_string(&path, 0));
                     }
@@ -3651,8 +3547,8 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             build_reduced_graph::populate_module_if_necessary(self, &search_module);
 
             {
-                for (_, child_names) in search_module.children.borrow().iter() {
-                    let def = match child_names.type_ns.def() {
+                for (_, ns_def) in search_module.children.borrow().iter() {
+                    let def = match ns_def.def() {
                         Some(def) => def,
                         None => continue,
                     };
@@ -3672,7 +3568,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                     None => continue,
                     Some(target) => target,
                 };
-                let did = match target.binding.def() {
+                let did = match target.ns_def.def() {
                     Some(DefTrait(trait_def_id)) => trait_def_id,
                     Some(..) | None => continue,
                 };
@@ -3743,8 +3639,10 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
         debug!("Children:");
         build_reduced_graph::populate_module_if_necessary(self, &module_);
-        for (&name, _) in module_.children.borrow().iter() {
-            debug!("* {}", name);
+        for (&(name, ns), _) in module_.children.borrow().iter() {
+            if ns == TypeNS || module_.get_child(name, TypeNS).is_none() {
+                debug!("* {}", name);
+            }
         }
 
         debug!("Import resolutions:");

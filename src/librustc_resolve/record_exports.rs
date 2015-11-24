@@ -18,7 +18,7 @@
 // Then this operation can simply be performed as part of item (or import)
 // processing.
 
-use {Module, NameBinding, Resolver};
+use {Module, Resolver, NsDef};
 use Namespace::{TypeNS, ValueNS};
 
 use build_reduced_graph;
@@ -78,8 +78,8 @@ impl<'a, 'b, 'tcx> ExportRecorder<'a, 'b, 'tcx> {
         self.record_exports_for_module(&*module_);
         build_reduced_graph::populate_module_if_necessary(self.resolver, &module_);
 
-        for (_, child_name_bindings) in module_.children.borrow().iter() {
-            match child_name_bindings.type_ns.module() {
+        for (_, ns_def) in module_.children.borrow().iter() {
+            match ns_def.module() {
                 None => {
                     // Nothing to do.
                 }
@@ -108,12 +108,8 @@ impl<'a, 'b, 'tcx> ExportRecorder<'a, 'b, 'tcx> {
         }
     }
 
-    fn add_export_of_namebinding(&mut self,
-                                 exports: &mut Vec<Export>,
-                                 name: ast::Name,
-                                 namebinding: &NameBinding) {
-        // namebinding.def().map(|d| exports.push(Export { name: name, def_id: d.def_id() }));
-        match namebinding.def() {
+    fn add_export_of_ns_def(&self, exports: &mut Vec<Export>, name: ast::Name, ns_def: &NsDef) {
+        match ns_def.def() {
             Some(d) => {
                 debug!("(computing exports) YES: export '{}' => {:?}",
                        name,
@@ -140,7 +136,7 @@ impl<'a, 'b, 'tcx> ExportRecorder<'a, 'b, 'tcx> {
                 match import_resolution.target_for_namespace(ns) {
                     Some(target) => {
                         debug!("(computing exports) maybe export '{}'", name);
-                        self.add_export_of_namebinding(exports, *name, &target.binding)
+                        self.add_export_of_ns_def(exports, *name, &target.ns_def)
                     }
                     _ => (),
                 }
