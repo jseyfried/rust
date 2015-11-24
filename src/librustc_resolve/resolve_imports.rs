@@ -177,11 +177,6 @@ impl ImportResolution {
             None => Shadowable::Always,
         }
     }
-
-    pub fn set_target_and_id(&mut self, namespace: Namespace, target: Option<Target>, id: NodeId) {
-        self[namespace].target = target;
-        self[namespace].id = id;
-    }
 }
 
 struct ImportResolvingError {
@@ -667,11 +662,13 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                                              directive.span,
                                                              target);
 
-                        let target = Some(Target::new(target_module.clone(),
-                                                      name_binding.clone(),
-                                                      directive.shadowable));
-                        import_resolution.set_target_and_id(namespace, target, directive.id);
-                        import_resolution[namespace].is_public = directive.is_public;
+                        import_resolution[namespace] = ImportResolution_ {
+                            target: Some(Target::new(target_module.clone(),
+                                                     name_binding.clone(),
+                                                     directive.shadowable)),
+                            id: directive.id,
+                            is_public: directive.is_public
+                        };
                         *used_public = name_binding.is_public();
                     }
                     UnboundResult => {
@@ -882,37 +879,35 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                module_to_string(module_));
 
         // Merge the child item into the import resolution.
-        {
-            let mut merge_child_item = |namespace| {
-                let modifier = DefModifiers::IMPORTABLE | DefModifiers::PUBLIC;
+        for &namespace in [TypeNS, ValueNS].iter() {
+            let modifier = DefModifiers::IMPORTABLE | DefModifiers::PUBLIC;
 
-                if name_bindings[namespace].defined_with(modifier) {
-                    let namespace_name = match namespace {
-                        TypeNS => "type",
-                        ValueNS => "value",
-                    };
-                    debug!("(resolving glob import) ... for {} target", namespace_name);
-                    if dest_import_resolution.shadowable(namespace) == Shadowable::Never {
-                        let msg = format!("a {} named `{}` has already been imported in this \
-                                           module",
-                                          namespace_name,
-                                          name);
-                        span_err!(self.resolver.session,
-                                  import_directive.span,
-                                  E0251,
-                                  "{}",
-                                  msg);
-                    } else {
-                        let target = Target::new(containing_module.clone(),
+            if name_bindings[namespace].defined_with(modifier) {
+                let namespace_name = match namespace {
+                    TypeNS => "type",
+                    ValueNS => "value",
+                };
+                debug!("(resolving glob import) ... for {} target", namespace_name);
+                if dest_import_resolution.shadowable(namespace) == Shadowable::Never {
+                    let msg = format!("a {} named `{}` has already been imported in this \
+                                       module",
+                                      namespace_name,
+                                      name);
+                    span_err!(self.resolver.session,
+                              import_directive.span,
+                              E0251,
+                              "{}",
+                              msg);
+                } else {
+                    dest_import_resolution[namespace] = ImportResolution_ {
+                        target: Some(Target::new(containing_module.clone(),
                                                  name_bindings[namespace].clone(),
-                                                 import_directive.shadowable);
-                        dest_import_resolution.set_target_and_id(namespace, Some(target), id);
-                        dest_import_resolution[namespace].is_public = is_public;
-                    }
+                                                 import_directive.shadowable)),
+                        id: id,
+                        is_public: is_public
+                    };
                 }
-            };
-            merge_child_item(ValueNS);
-            merge_child_item(TypeNS);
+            }
         }
 
         self.check_for_conflicts_between_imports_and_items(module_,
