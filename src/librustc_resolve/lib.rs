@@ -331,7 +331,7 @@ fn resolve_error<'b, 'a: 'b, 'tcx: 'a>(resolver: &'b Resolver<'a, 'tcx>,
                                              .import_resolutions
                                              .borrow()
                                              .get(&name) {
-                let item = resolver.ast_map.expect_item(directive.value_id);
+                let item = resolver.ast_map.expect_item(directive.value_ns.id);
                 resolver.session.span_note(item.span, "constant imported here");
             }
         }
@@ -1722,9 +1722,11 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
         // Check the list of resolved imports.
         match module_.import_resolutions.borrow().get(&name) {
-            Some(import_resolution) if allow_private_imports || import_resolution.is_public => {
+            Some(import_resolution) if allow_private_imports ||
+                                       import_resolution[namespace].is_public => {
 
-                if import_resolution.is_public && import_resolution.outstanding_references != 0 {
+                if import_resolution[namespace].is_public &&
+                   import_resolution.outstanding_references != 0 {
                     debug!("(resolving name in module) import unresolved; bailing out");
                     return Indeterminate;
                 }
@@ -3676,7 +3678,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                 };
                 if self.trait_item_map.contains_key(&(name, did)) {
                     add_trait_info(&mut found_traits, did, name);
-                    let id = import.type_id;
+                    let id = import.type_ns.id;
                     self.used_imports.insert((id, TypeNS));
                     let trait_name = self.get_trait_name(did);
                     self.record_import_use(id, trait_name);

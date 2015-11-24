@@ -112,6 +112,7 @@ impl<'a, 'b, 'tcx> ExportRecorder<'a, 'b, 'tcx> {
                                  exports: &mut Vec<Export>,
                                  name: ast::Name,
                                  namebinding: &NameBinding) {
+        // namebinding.def().map(|d| exports.push(Export { name: name, def_id: d.def_id() }));
         match namebinding.def() {
             Some(d) => {
                 debug!("(computing exports) YES: export '{}' => {:?}",
@@ -130,11 +131,12 @@ impl<'a, 'b, 'tcx> ExportRecorder<'a, 'b, 'tcx> {
 
     fn add_exports_for_module(&mut self, exports: &mut Vec<Export>, module_: &Module) {
         for (name, import_resolution) in module_.import_resolutions.borrow().iter() {
-            if !import_resolution.is_public {
-                continue;
-            }
             let xs = [TypeNS, ValueNS];
             for &ns in &xs {
+                if !import_resolution[ns].is_public {
+                    continue;
+                }
+
                 match import_resolution.target_for_namespace(ns) {
                     Some(target) => {
                         debug!("(computing exports) maybe export '{}'", name);

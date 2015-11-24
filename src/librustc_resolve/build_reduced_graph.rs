@@ -846,9 +846,10 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                         resolution.outstanding_references += 1;
 
                         // the source of this name is different now
-                        resolution.type_id = id;
-                        resolution.value_id = id;
-                        resolution.is_public = is_public;
+                        for &ns in [TypeNS, ValueNS].iter() {
+                            resolution[ns].id = id;
+                            resolution[ns].is_public = is_public;
+                        }
                         return;
                     }
                     None => {}
