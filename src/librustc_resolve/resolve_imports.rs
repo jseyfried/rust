@@ -456,83 +456,24 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         // search imports as well.
         let mut value_used_reexport = false;
         let mut type_used_reexport = false;
-        match (value_result.clone(), type_result.clone()) {
-            (Success(..), Success(..)) => {} // Continue.
-            _ => {
-                // If there is an unresolved glob at this point in the
-                // containing module, bail out. We don't know enough to be
-                // able to resolve this import.
 
-                if target_module.pub_glob_count.get() > 0 {
-                    debug!("(resolving single import) unresolved pub glob; bailing out");
-                    return ResolveResult::Indeterminate;
-                }
+        if let Indeterminate = value_result {
+            let (result, used_reexport) =
+                self.resolve_in_imports(&target_module, source, ValueNS, module_);
+            value_result = result;
+            value_used_reexport = used_reexport;
 
-                // Now search the exported imports within the containing module.
-                match target_module.import_resolutions.borrow().get(&(source, ValueNS)) {
-                    None => {
-                        // The containing module definitely doesn't have an
-                        // exported import with the name in question. We can
-                        // therefore accurately report that the names are
-                        // unbound.
+            if let Indeterminate = value_result { return Indeterminate }
+        }
 
-                        if let Indeterminate = value_result { value_result = Failed(None); }
-                    }
-                    Some(import_resolution) if import_resolution.outstanding_references == 0 => {
-                        // The name is an import which has been fully
-                        // resolved. We can, therefore, just follow it.
 
-                        if let Indeterminate = value_result {
-                            value_result = self.get_binding(import_resolution, ValueNS, source);
-                            value_used_reexport = import_resolution.is_public;
-                        }
-                    }
-                    Some(_) => {
-                        // If target_module is the same module whose import we are resolving
-                        // and there it has an unresolved import with the same name as `source`,
-                        // then the user is actually trying to import an item that is declared
-                        // in the same scope
-                        //
-                        // e.g
-                        // use self::submodule;
-                        // pub mod submodule;
-                        //
-                        // In this case we continue as if we resolved the import and let the
-                        // check_for_conflicts_between_imports_and_items call below handle
-                        // the conflict
-                        match (module_.def_id(), target_module.def_id()) {
-                            (Some(id1), Some(id2)) if id1 == id2 => {
-                                if let Indeterminate = value_result {
-                                    value_result = Failed(None);
-                                }
-                            }
-                            _ => { return ResolveResult::Indeterminate; }
-                        }
-                    }
-                }
+        if let Indeterminate = type_result {
+            let (result, used_reexport) =
+                self.resolve_in_imports(&target_module, source, TypeNS, module_);
+            type_result = result;
+            type_used_reexport = used_reexport;
 
-                match target_module.import_resolutions.borrow().get(&(source, TypeNS)) {
-                    None => {
-                        if let Indeterminate = type_result { type_result = Failed(None); }
-                    }
-                    Some(import_resolution) if import_resolution.outstanding_references == 0 => {
-                        if let Indeterminate = type_result {
-                            type_result = self.get_binding(import_resolution, TypeNS, source);
-                            type_used_reexport = import_resolution.is_public;
-                        }
-                    }
-                    Some(_) => {
-                        match (module_.def_id(), target_module.def_id()) {
-                            (Some(id1), Some(id2)) if id1 == id2 => {
-                                if let Indeterminate = type_result {
-                                    type_result = Failed(None);
-                                }
-                            }
-                            _ => { return ResolveResult::Indeterminate; }
-                        }
-                    }
-                }
-            }
+            if let Indeterminate = type_result { return Indeterminate }
         }
 
         let mut value_used_public = false;
@@ -572,7 +513,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             let msg = format!("There is no `{}` in `{}`",
                               source,
                               module_to_string(&target_module));
-            return ResolveResult::Failed(Some((directive.span, msg)));
+            return Failed(Some((directive.span, msg)));
         }
 
         let value_used_public = value_used_reexport || value_used_public;
@@ -582,7 +523,50 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         self.record_import_resolution(module_, directive, target, TypeNS, type_used_public, lp);
 
         debug!("(resolving single import) successfully resolved import");
-        return ResolveResult::Success(());
+        return Success(());
+    }
+
+    fn resolve_in_imports(&mut self,
+                          module: &Module,
+                          name: Name,
+                          ns: Namespace,
+                          origin_module: &Module)
+                          -> (ResolveResult<(Rc<Module>, NsDef)>, bool) {
+        // If there is an unresolved glob at this point in the
+        // containing module, bail out. We don't know enough to be
+        // able to resolve this import.
+
+        if module.pub_glob_count.get() > 0 {
+            debug!("(resolving single import) unresolved pub glob; bailing out");
+            return (Indeterminate, false);
+        }
+
+        // Now search the exported imports within the containing module.
+        match module.import_resolutions.borrow().get(&(name, ns)) {
+            // The containing module definitely doesn't have an exported import with the name
+            // in question. We can therecore accurately report that the names are unbound.
+            None => (Failed(None), false),
+
+            // The name is an import which has been fully resolved.
+            // We can, therefore, just follow it.
+            Some(import_resolution) if import_resolution.outstanding_references == 0 =>
+                (self.get_binding(import_resolution, ns, name), import_resolution.is_public),
+
+            // If module is the same as the original module whose import we are resolving and
+            // there it has an unresolved import with the same name as `source`, then the user
+            // is actually trying to import an item that is declared in the same scope.
+            //
+            // e.g
+            // use self::submodule;
+            // pub mod submodule;
+            //
+            // In this case we continue as if we resolved the import and let
+            // check_for_conflicts_between_imports_and_items handle the conflict.
+            Some(_) => match (origin_module.def_id(), module.def_id()) {
+                (Some(id1), Some(id2)) if id1 == id2 => (Failed(None), false),
+                _ => (Indeterminate, false),
+            },
+        }
     }
 
     fn check_and_write_import(&mut self,
@@ -698,7 +682,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         // (including globs).
         if (*target_module).pub_count.get() > 0 {
             debug!("(resolving glob import) target module has unresolved pub imports; bailing out");
-            return ResolveResult::Indeterminate;
+            return Indeterminate;
         }
 
         // Add all resolved imports from the containing module.
@@ -709,7 +693,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             // This means we are trying to glob import a module into itself,
             // and it is a no-go
             debug!("(resolving glob imports) target module is current module; giving up");
-            return ResolveResult::Failed(Some((import_directive.span,
+            return Failed(Some((import_directive.span,
                                                "Cannot glob-import a module into itself.".into())));
         }
 
@@ -777,7 +761,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         }
 
         debug!("(resolving glob import) successfully resolved import");
-        return ResolveResult::Success(());
+        return Success(());
     }
 
     fn merge_import_resolution(&mut self,
