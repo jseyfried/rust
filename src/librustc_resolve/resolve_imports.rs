@@ -445,30 +445,25 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
 
         // pub_err makes sure we don't give the same error twice.
         let mut pub_err = false;
+        let value_used_reexport = &mut false;
+        let type_used_reexport = &mut false;
+        let mut value_used_public = false;
+        let mut type_used_public = false;
 
         // We need to resolve both namespaces for this to succeed.
         let value_result = self.resolve_name(&target_module, source, ValueNS,
                                                  directive, &mut pub_err);
-        let type_result = self.resolve_name(&target_module, source, TypeNS,
-                                                directive, &mut pub_err);
-
-        // Unless we managed to find a result in both namespaces (unlikely),
-        // search imports as well.
-        let value_used_reexport = &mut false;
-        let type_used_reexport = &mut false;
-
         let value_result = value_result.or(|| {
             self.resolve_in_imports(&target_module, source, ValueNS, module_, value_used_reexport)
         });
         if let Indeterminate = value_result { return Indeterminate }
 
+        let type_result = self.resolve_name(&target_module, source, TypeNS,
+                                                directive, &mut pub_err);
         let type_result = type_result.or(|| {
             self.resolve_in_imports(&target_module, source, TypeNS, module_, type_used_reexport)
         });
         if let Indeterminate = type_result { return Indeterminate }
-
-        let mut value_used_public = false;
-        let mut type_used_public = false;
 
         // If we didn't find a result in the type namespace, search the
         // external modules.
