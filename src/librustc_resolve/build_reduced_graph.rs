@@ -754,24 +754,16 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                        target);
 
                 let mut import_resolutions = module_.import_resolutions.borrow_mut();
-                match import_resolutions.get_mut(&target) {
-                    Some(resolution) => {
-                        debug!("(building import directive) bumping reference");
-                        resolution.outstanding_references += 1;
+                for &ns in [TypeNS, ValueNS].iter() {
+                    let mut resolution = import_resolutions.entry((target, ns)).or_insert(
+                        ImportResolution::new(id, is_public)
+                    );
 
-                        // the source of this name is different now
-                        for &ns in [TypeNS, ValueNS].iter() {
-                            resolution[ns].id = id;
-                            resolution[ns].is_public = is_public;
-                        }
-                        return;
-                    }
-                    None => {}
+                    resolution.outstanding_references += 1;
+                    // the source of this name is different now
+                    resolution.id = id;
+                    resolution.is_public = is_public;
                 }
-                debug!("(building import directive) creating new");
-                let mut resolution = ImportResolution::new(id, is_public);
-                resolution.outstanding_references = 1;
-                import_resolutions.insert(target, resolution);
             }
             GlobImport => {
                 // Set the glob flag. This tells us that we don't know the

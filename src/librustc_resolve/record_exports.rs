@@ -19,7 +19,6 @@
 // processing.
 
 use {Module, Resolver, NsDef};
-use Namespace::{TypeNS, ValueNS};
 
 use build_reduced_graph;
 use module_to_string;
@@ -126,20 +125,17 @@ impl<'a, 'b, 'tcx> ExportRecorder<'a, 'b, 'tcx> {
     }
 
     fn add_exports_for_module(&mut self, exports: &mut Vec<Export>, module_: &Module) {
-        for (name, import_resolution) in module_.import_resolutions.borrow().iter() {
-            let xs = [TypeNS, ValueNS];
-            for &ns in &xs {
-                if !import_resolution[ns].is_public {
-                    continue;
-                }
+        for (&(name, _), import_resolution) in module_.import_resolutions.borrow().iter() {
+            if !import_resolution.is_public {
+                continue;
+            }
 
-                match import_resolution.target_for_namespace(ns) {
-                    Some(target) => {
-                        debug!("(computing exports) maybe export '{}'", name);
-                        self.add_export_of_ns_def(exports, *name, &target.ns_def)
-                    }
-                    _ => (),
+            match import_resolution.target.clone() {
+                Some(target) => {
+                    debug!("(computing exports) maybe export '{}'", name);
+                    self.add_export_of_ns_def(exports, name, &target.ns_def)
                 }
+                _ => (),
             }
         }
     }

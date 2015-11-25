@@ -329,8 +329,8 @@ fn resolve_error<'b, 'a: 'b, 'tcx: 'a>(resolver: &'b Resolver<'a, 'tcx>,
             if let Some(directive) = resolver.current_module
                                              .import_resolutions
                                              .borrow()
-                                             .get(&name) {
-                let item = resolver.ast_map.expect_item(directive.value_ns.id);
+                                             .get(&(name, ValueNS)) {
+                let item = resolver.ast_map.expect_item(directive.id);
                 resolver.session.span_note(item.span, "constant imported here");
             }
         }
@@ -771,7 +771,7 @@ pub struct Module {
     anonymous_children: RefCell<NodeMap<Rc<Module>>>,
 
     // The status of resolving each import in this module.
-    import_resolutions: RefCell<HashMap<Name, ImportResolution>>,
+    import_resolutions: RefCell<HashMap<(Name, Namespace), ImportResolution>>,
 
     // The number of unresolved globs that this module exports.
     glob_count: Cell<usize>,
@@ -1385,8 +1385,8 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         // all its imports in the usual way; this is because chains of
         // adjacent import statements are processed as though they mutated the
         // current scope.
-        if let Some(import_resolution) = module_.import_resolutions.borrow().get(&name) {
-            match (*import_resolution).target_for_namespace(namespace) {
+        if let Some(import_resolution) = module_.import_resolutions.borrow().get(&(name, namespace)) {
+            match import_resolution.target.clone() {
                 None => {
                     // Not found; continue.
                     debug!("(resolving item in lexical scope) found import resolution, but not \
@@ -1396,7 +1396,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                 Some(target) => {
                     debug!("(resolving item in lexical scope) using import resolution");
                     // track used imports and extern crates as well
-                    let id = import_resolution.id(namespace);
+                    let id = import_resolution.id;
                     self.used_imports.insert((id, namespace));
                     self.record_import_use(id, name);
                     if let Some(DefId{krate: kid, ..}) = target.target_module.def_id() {
@@ -1568,16 +1568,16 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         }
 
         // Check the list of resolved imports.
-        match module_.import_resolutions.borrow().get(&name) {
+        match module_.import_resolutions.borrow().get(&(name, namespace)) {
             Some(import_resolution) if allow_private_imports ||
-                                       import_resolution[namespace].is_public => {
+                                       import_resolution.is_public => {
 
-                if import_resolution[namespace].is_public &&
+                if import_resolution.is_public &&
                    import_resolution.outstanding_references != 0 {
                     debug!("(resolving name in module) import unresolved; bailing out");
                     return Indeterminate;
                 }
-                match import_resolution.target_for_namespace(namespace) {
+                match import_resolution.target.clone() {
                     None => {
                         debug!("(resolving name in module) name found, but not in namespace {:?}",
                                namespace);
@@ -1585,7 +1585,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                     Some(target) => {
                         debug!("(resolving name in module) resolved to import");
                         // track used imports and extern crates as well
-                        let id = import_resolution.id(namespace);
+                        let id = import_resolution.id;
                         self.used_imports.insert((id, namespace));
                         self.record_import_use(id, name);
                         if let Some(DefId{krate: kid, ..}) = target.target_module.def_id() {
@@ -3510,10 +3510,10 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             }
 
             // Look for imports.
-            for (_, import) in search_module.import_resolutions.borrow().iter() {
-                let target = match import.target_for_namespace(TypeNS) {
-                    None => continue,
-                    Some(target) => target,
+            for (&(_, ns), import) in search_module.import_resolutions.borrow().iter() {
+                let target = match (ns, import.target.clone()) {
+                    (TypeNS, Some(target)) => target,
+                    _ => continue,
                 };
                 let did = match target.ns_def.def() {
                     Some(DefTrait(trait_def_id)) => trait_def_id,
@@ -3521,7 +3521,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                 };
                 if self.trait_item_map.contains_key(&(name, did)) {
                     add_trait_info(&mut found_traits, did, name);
-                    let id = import.type_ns.id;
+                    let id = import.id;
                     self.used_imports.insert((id, TypeNS));
                     let trait_name = self.get_trait_name(did);
                     self.record_import_use(id, trait_name);
@@ -3594,30 +3594,15 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
         debug!("Import resolutions:");
         let import_resolutions = module_.import_resolutions.borrow();
-        for (&name, import_resolution) in import_resolutions.iter() {
-            let value_repr;
-            match import_resolution.target_for_namespace(ValueNS) {
-                None => {
-                    value_repr = "".to_string();
-                }
+        for (&(name, ns), import_resolution) in import_resolutions.iter() {
+            let repr = match import_resolution.target.clone() {
+                None => "".to_string(),
                 Some(_) => {
-                    value_repr = " value:?".to_string();
+                    (match ns { ValueNS => " value:?", TypeNS => " type:?" }).to_string()
                     // FIXME #4954
                 }
-            }
-
-            let type_repr;
-            match import_resolution.target_for_namespace(TypeNS) {
-                None => {
-                    type_repr = "".to_string();
-                }
-                Some(_) => {
-                    type_repr = " type:?".to_string();
-                    // FIXME #4954
-                }
-            }
-
-            debug!("* {}:{}{}", name, value_repr, type_repr);
+            };
+            debug!("* {} {:?} : {}", name, ns, repr);
         }
     }
 }

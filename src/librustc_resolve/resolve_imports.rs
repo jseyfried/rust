@@ -108,13 +108,6 @@ pub struct ImportResolution {
     // used in both namespaces.
     pub outstanding_references: usize,
 
-    pub type_ns: ImportResolution_,
-    pub value_ns: ImportResolution_,
-}
-
-/// An ImportResolution binds an imported name in a given namespace.
-#[derive(Debug)]
-pub struct ImportResolution_ {
     /// Whether this resolution came from a `use` or a `pub use`. Note that this
     /// should *not* be used whenever resolution is being performed. Privacy
     /// testing occurs during a later phase of compilation.
@@ -127,48 +120,18 @@ pub struct ImportResolution_ {
     pub id: NodeId,
 }
 
-impl ::std::ops::Index<Namespace> for ImportResolution {
-    type Output = ImportResolution_;
-    fn index(&self, ns: Namespace) -> &ImportResolution_ {
-        match ns { TypeNS => &self.type_ns, ValueNS => &self.value_ns }
-    }
-}
-
-impl ::std::ops::IndexMut<Namespace> for ImportResolution {
-    fn index_mut(&mut self, ns: Namespace) -> &mut ImportResolution_ {
-        match ns { TypeNS => &mut self.type_ns, ValueNS => &mut self.value_ns }
-    }
-}
-
-impl ImportResolution_ {
+impl ImportResolution {
     pub fn new(id: NodeId, is_public: bool) -> Self {
-        ImportResolution_ {
+        ImportResolution {
+            outstanding_references: 0,
             id: id,
             target: None,
             is_public: is_public,
         }
     }
-}
 
-impl ImportResolution {
-    pub fn new(id: NodeId, is_public: bool) -> ImportResolution {
-        ImportResolution {
-            outstanding_references: 0,
-            type_ns: ImportResolution_::new(id, is_public),
-            value_ns: ImportResolution_::new(id, is_public),
-        }
-    }
-
-    pub fn target_for_namespace(&self, namespace: Namespace) -> Option<Target> {
-        self[namespace].target.clone()
-    }
-
-    pub fn id(&self, namespace: Namespace) -> NodeId {
-        self[namespace].id
-    }
-
-    pub fn shadowable(&self, namespace: Namespace) -> Shadowable {
-        match self[namespace].target {
+    pub fn shadowable(&self) -> Shadowable {
+        match self.target {
             Some(ref target) => target.shadowable,
             None => Shadowable::Always,
         }
@@ -418,15 +381,15 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                    -> ResolveResult<(Rc<Module>, NsDef)> {
         // Import resolutions must be declared with "pub"
         // in order to be exported.
-        if !import_resolution[namespace].is_public {
+        if !import_resolution.is_public {
             return Failed(None);
         }
 
-        match import_resolution.target_for_namespace(namespace) {
+        match import_resolution.target.clone() {
             None => Failed(None),
             Some(Target { target_module, ns_def, shadowable: _ }) => {
                 debug!("(resolving single import) found import in ns {:?}", namespace);
-                let id = import_resolution.id(namespace);
+                let id = import_resolution.id;
                 // track used imports and extern crates as well
                 self.resolver.used_imports.insert((id, namespace));
                 self.resolver.record_import_use(id, source);
@@ -506,33 +469,23 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                 }
 
                 // Now search the exported imports within the containing module.
-                match target_module.import_resolutions.borrow().get(&source) {
+                match target_module.import_resolutions.borrow().get(&(source, ValueNS)) {
                     None => {
-                        debug!("(resolving single import) no import");
                         // The containing module definitely doesn't have an
                         // exported import with the name in question. We can
                         // therefore accurately report that the names are
                         // unbound.
 
-                        if let Indeterminate = value_result {
-                            value_result = Failed(None);
-                        }
-                        if let Indeterminate = type_result {
-                            type_result = Failed(None);
-                        }
+                        if let Indeterminate = value_result { value_result = Failed(None); }
                     }
                     Some(import_resolution) if import_resolution.outstanding_references == 0 => {
                         // The name is an import which has been fully
                         // resolved. We can, therefore, just follow it.
+
                         if let Indeterminate = value_result {
                             value_result = self.get_binding(import_resolution, ValueNS, source);
-                            value_used_reexport = import_resolution.value_ns.is_public;
+                            value_used_reexport = import_resolution.is_public;
                         }
-                        if let Indeterminate = type_result {
-                            type_result = self.get_binding(import_resolution, TypeNS, source);
-                            type_used_reexport = import_resolution.type_ns.is_public;
-                        }
-
                     }
                     Some(_) => {
                         // If target_module is the same module whose import we are resolving
@@ -552,15 +505,30 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                 if let Indeterminate = value_result {
                                     value_result = Failed(None);
                                 }
+                            }
+                            _ => { return ResolveResult::Indeterminate; }
+                        }
+                    }
+                }
+
+                match target_module.import_resolutions.borrow().get(&(source, TypeNS)) {
+                    None => {
+                        if let Indeterminate = type_result { type_result = Failed(None); }
+                    }
+                    Some(import_resolution) if import_resolution.outstanding_references == 0 => {
+                        if let Indeterminate = type_result {
+                            type_result = self.get_binding(import_resolution, TypeNS, source);
+                            type_used_reexport = import_resolution.is_public;
+                        }
+                    }
+                    Some(_) => {
+                        match (module_.def_id(), target_module.def_id()) {
+                            (Some(id1), Some(id2)) if id1 == id2 => {
                                 if let Indeterminate = type_result {
                                     type_result = Failed(None);
                                 }
                             }
-                            _ => {
-                                // The import is unresolved. Bail out.
-                                debug!("(resolving single import) unresolved import; bailing out");
-                                return ResolveResult::Indeterminate;
-                            }
+                            _ => { return ResolveResult::Indeterminate; }
                         }
                     }
                 }
@@ -596,10 +564,12 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
 
         // We've successfully resolved the import. Write the results in.
         let mut import_resolutions = module_.import_resolutions.borrow_mut();
-        let import_resolution = import_resolutions.get_mut(&target).unwrap();
 
         {
             let mut check_and_write_import = |namespace, result: &ResolveResult<(Rc<Module>, NsDef)>, used_public: &mut bool| {
+
+                let import_resolution = import_resolutions.get_mut(&(target, namespace)).unwrap();
+                
                 let namespace_name = match namespace {
                     TypeNS => "type",
                     ValueNS => "value",
@@ -619,13 +589,13 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                                              directive.span,
                                                              target);
 
-                        import_resolution[namespace] = ImportResolution_ {
-                            target: Some(Target::new(target_module.clone(),
-                                                     ns_def.clone(),
-                                                     directive.shadowable)),
-                            id: directive.id,
-                            is_public: directive.is_public
-                        };
+                        let target = Target::new(target_module.clone(),
+                                                 ns_def.clone(),
+                                                 directive.shadowable);
+                        import_resolution.target = Some(target);
+                        import_resolution.id = directive.id;
+                        import_resolution.is_public = directive.is_public;
+                        
                         *used_public = ns_def.is_public();
                     }
                     Failed(_) => {
@@ -655,30 +625,40 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         let value_used_public = value_used_reexport || value_used_public;
         let type_used_public = type_used_reexport || type_used_public;
 
-        assert!(import_resolution.outstanding_references >= 1);
-        import_resolution.outstanding_references -= 1;
+        let value_def_and_priv = {
+            let import_resolution_value = import_resolutions.get_mut(&(target, ValueNS)).unwrap();
+            assert!(import_resolution_value.outstanding_references >= 1);
+            import_resolution_value.outstanding_references -= 1;
 
-        // Record what this import resolves to for later uses in documentation,
-        // this may resolve to either a value or a type, but for documentation
-        // purposes it's good enough to just favor one over the other.
-        let value_def_and_priv = import_resolution.value_ns.target.as_ref().map(|target| {
-            let def = target.ns_def.def().unwrap();
-            (def,
-             if value_used_public {
-                lp
-            } else {
-                DependsOn(def.def_id())
+            // Record what this import resolves to for later uses in documentation,
+            // this may resolve to either a value or a type, but for documentation
+            // purposes it's good enough to just favor one over the other.
+            import_resolution_value.target.as_ref().map(|target| {
+                let def = target.ns_def.def().unwrap();
+                (def,
+                 if value_used_public {
+                    lp
+                } else {
+                    DependsOn(def.def_id())
+                })
             })
-        });
-        let type_def_and_priv = import_resolution.type_ns.target.as_ref().map(|target| {
-            let def = target.ns_def.def().unwrap();
-            (def,
-             if type_used_public {
-                lp
-            } else {
-                DependsOn(def.def_id())
+        };
+
+        let type_def_and_priv = {
+            let import_resolution_type = import_resolutions.get_mut(&(target, TypeNS)).unwrap();
+            assert!(import_resolution_type.outstanding_references >= 1);
+            import_resolution_type.outstanding_references -= 1;
+
+            import_resolution_type.target.as_ref().map(|target| {
+                let def = target.ns_def.def().unwrap();
+                (def,
+                if type_used_public {
+                    lp
+                } else {
+                    DependsOn(def.def_id())
+                })
             })
-        });
+        };
 
         let import_lp = LastImport {
             value_priv: value_def_and_priv.map(|(_, p)| p),
@@ -745,27 +725,25 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                                "Cannot glob-import a module into itself.".into())));
         }
 
-        for (name, target_import_resolution) in import_resolutions.iter() {
+        for (&(name, ns), target_import_resolution) in import_resolutions.iter() {
             debug!("(resolving glob import) writing module resolution {} into `{}`",
-                   *name,
+                   name,
                    module_to_string(module_));
 
             // Here we merge two import resolutions.
             let mut import_resolutions = module_.import_resolutions.borrow_mut();
-            if let Some(dest_import_resolution) = import_resolutions.get_mut(name) {
+            if let Some(dest_import_resolution) = import_resolutions.get_mut(&(name, ns)) {
                 // Merge the two import resolutions at a finer-grained
                 // level.
-                for &ns in [TypeNS, ValueNS].iter() {
-                    if !target_import_resolution[ns].is_public { continue }
+                if !target_import_resolution.is_public { continue }
 
-                    if let Some(ref target) = target_import_resolution[ns].target {
-                        self.check_for_conflicting_import(&dest_import_resolution,
-                                                          import_directive.span,
-                                                          *name,
-                                                          ns);
-                        dest_import_resolution[ns].target = Some(target.clone());
-                        dest_import_resolution[ns].is_public = is_public;
-                    }
+                if let Some(ref target) = target_import_resolution.target {
+                    self.check_for_conflicting_import(&dest_import_resolution,
+                                                      import_directive.span,
+                                                      name,
+                                                      ns);
+                    dest_import_resolution.target = Some(target.clone());
+                    dest_import_resolution.is_public = is_public;
                 }
                 
                 continue
@@ -773,12 +751,10 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
 
             // Simple: just copy the old import resolution.
             let mut new_import_resolution = ImportResolution::new(id, is_public);
-            for &ns in [TypeNS, ValueNS].iter() {
-                if !target_import_resolution[ns].is_public { continue }
-                new_import_resolution[ns].target =
-                    target_import_resolution[ns].target.clone();
-            }
-            import_resolutions.insert(*name, new_import_resolution);
+            if !target_import_resolution.is_public { continue }
+            new_import_resolution.target =
+                target_import_resolution.target.clone();
+            import_resolutions.insert((name, ns), new_import_resolution);
         }
 
         // Add all children from the containing module.
@@ -826,7 +802,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         let is_public = import_directive.is_public;
 
         let mut import_resolutions = module_.import_resolutions.borrow_mut();
-        let dest_import_resolution = import_resolutions.entry(name)
+        let dest_import_resolution = import_resolutions.entry((name, namespace))
                                                        .or_insert_with(|| {
                                                            ImportResolution::new(id, is_public)
                                                        });
@@ -845,7 +821,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                 ValueNS => "value",
             };
             debug!("(resolving glob import) ... for {} target", namespace_name);
-            if dest_import_resolution.shadowable(namespace) == Shadowable::Never {
+            if dest_import_resolution.shadowable() == Shadowable::Never {
                 let msg = format!("a {} named `{}` has already been imported in this \
                                    module",
                                  namespace_name,
@@ -856,13 +832,12 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                          "{}",
                         msg);
            } else {
-                dest_import_resolution[namespace] = ImportResolution_ {
-                    target: Some(Target::new(containing_module.clone(),
-                                             ns_def.clone(),
-                                             import_directive.shadowable)),
-                    id: id,
-                    is_public: is_public
-                };
+                let target = Target::new(containing_module.clone(),
+                                         ns_def.clone(),
+                                         import_directive.shadowable);
+                dest_import_resolution.target = Some(target);
+                dest_import_resolution.id = id;
+                dest_import_resolution.is_public = is_public;
             }
         }
 
@@ -878,7 +853,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                     import_span: Span,
                                     name: Name,
                                     namespace: Namespace) {
-        let target = import_resolution.target_for_namespace(namespace);
+        let target = import_resolution.target.clone();
         debug!("check_for_conflicting_import: {}; target exists: {}",
                name,
                target.is_some());
@@ -901,7 +876,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                           "a {} named `{}` has already been imported in this module",
                           ns_word,
                           name);
-                let use_id = import_resolution.id(namespace);
+                let use_id = import_resolution.id;
                 let item = self.resolver.ast_map.expect_item(use_id);
                 // item is syntax::ast::Item;
                 span_note!(self.resolver.session,
@@ -933,7 +908,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         // First, check for conflicts between imports and `extern crate`s.
         if let TypeNS = ns {
             if module.external_module_children.borrow().contains_key(&name) {
-                match import_resolution.type_ns.target {
+                match import_resolution.target {
                     Some(ref target) if target.shadowable != Shadowable::Always => {
                         let msg = format!("import `{0}` conflicts with imported crate \
                                            in this module (maybe you meant `use {0}::*`?)",
@@ -955,7 +930,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         };
 
         if let ValueNS = ns {
-            match import_resolution.value_ns.target {
+            match import_resolution.target {
                 Some(ref target) if target.shadowable != Shadowable::Always => {
                     span_err!(self.resolver.session,
                               import_span,
@@ -969,7 +944,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                 Some(_) | None => {}
             }
         } else {
-            match import_resolution.type_ns.target {
+            match import_resolution.target {
                 Some(ref target) if target.shadowable != Shadowable::Always => {
                     let (what, note) = match ns_def.module() {
                         Some(ref module) if module.is_normal() =>
