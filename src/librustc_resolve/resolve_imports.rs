@@ -411,6 +411,62 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         return resolution_result;
     }
 
+    fn get_binding(&mut self,
+                   import_resolution: &ImportResolution,
+                   namespace: Namespace,
+                   source: Name)
+                   -> ResolveResult<(Rc<Module>, NsDef)> {
+        // Import resolutions must be declared with "pub"
+        // in order to be exported.
+        if !import_resolution[namespace].is_public {
+            return Failed(None);
+        }
+
+        match import_resolution.target_for_namespace(namespace) {
+            None => Failed(None),
+            Some(Target { target_module, ns_def, shadowable: _ }) => {
+                debug!("(resolving single import) found import in ns {:?}", namespace);
+                let id = import_resolution.id(namespace);
+                // track used imports and extern crates as well
+                self.resolver.used_imports.insert((id, namespace));
+                self.resolver.record_import_use(id, source);
+                if let Some(DefId { krate, .. }) = target_module.def_id() {
+                    self.resolver.used_crates.insert(krate);
+                }
+                Success((target_module, ns_def))
+            }
+        }
+    }
+
+
+    fn resolve_name(&self, module: &Rc<Module>, name: Name, ns: Namespace,
+                    directive: &ImportDirective, pub_err: &mut bool)
+                    -> ResolveResult<(Rc<Module>, NsDef)> {
+        let mut result: ResolveResult<(Rc<Module>, NsDef)> = Indeterminate;
+
+        if let Some(ns_def) = module.get_child(name, ns) {
+            debug!("(resolving single import) found {} binding",
+                   match ns { ValueNS => "value", TypeNS => "type" });
+
+            result = Success((module.clone(), ns_def.clone()));
+
+            if !*pub_err && directive.is_public && !ns_def.is_public() {
+                let msg = format!("`{}` is private, and cannot be reexported", name);
+                let note_msg = if let ValueNS = ns {
+                    span_err!(self.resolver.session, directive.span, E0364, "{}", &msg);
+                    format!("Consider marking `{}` as `pub` in the imported module", name)
+                } else {
+                    span_err!(self.resolver.session, directive.span, E0365, "{}", &msg);
+                    format!("Consider declaring module `{}` as a `pub mod`", name)
+                };
+                self.resolver.session.span_note(directive.span, &note_msg);
+                *pub_err = true;
+            }
+        }
+
+        result
+    }
+
     fn resolve_single_import(&mut self,
                              module_: &Module,
                              target_module: Rc<Module>,
@@ -421,42 +477,17 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                              -> ResolveResult<()> {
         let lp = match lp { LastMod(lp) => lp, LastImport {..} => panic!() };
 
-        // We need to resolve both namespaces for this to succeed.
-        let mut value_result: ResolveResult<(Rc<Module>, NsDef)> = Indeterminate;
-        let mut type_result: ResolveResult<(Rc<Module>, NsDef)> = Indeterminate;
-
         // Search for direct children of the containing module.
         build_reduced_graph::populate_module_if_necessary(self.resolver, &target_module);
 
         // pub_err makes sure we don't give the same error twice.
         let mut pub_err = false;
 
-        if let Some(ns_def) = target_module.get_child(source, ValueNS) {
-            debug!("(resolving single import) found value binding");
-            value_result = Success((target_module.clone(), ns_def.clone()));
-            if directive.is_public && !ns_def.is_public() {
-                let msg = format!("`{}` is private, and cannot be reexported", source);
-                let note_msg = format!("Consider marking `{}` as `pub` in the imported \
-                                        module",
-                                        source);
-                span_err!(self.resolver.session, directive.span, E0364, "{}", &msg);
-                self.resolver.session.span_note(directive.span, &note_msg);
-                pub_err = true;
-            }
-        }
-
-
-        if let Some(ns_def) = target_module.get_child(source, TypeNS) {
-            debug!("(resolving single import) found type binding");
-            type_result = Success((target_module.clone(), ns_def.clone()));
-            if !pub_err && directive.is_public && !ns_def.is_public() {
-                let msg = format!("`{}` is private, and cannot be reexported", source);
-                let note_msg = format!("Consider declaring module `{}` as a `pub mod`",
-                                       source);
-                span_err!(self.resolver.session, directive.span, E0365, "{}", &msg);
-                self.resolver.session.span_note(directive.span, &note_msg);
-            }
-        }
+        // We need to resolve both namespaces for this to succeed.
+        let mut value_result = self.resolve_name(&target_module, source, ValueNS,
+                                                 directive, &mut pub_err);
+        let mut type_result = self.resolve_name(&target_module, source, TypeNS,
+                                                directive, &mut pub_err);
 
         // Unless we managed to find a result in both namespaces (unlikely),
         // search imports as well.
@@ -491,58 +522,14 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                         }
                     }
                     Some(import_resolution) if import_resolution.outstanding_references == 0 => {
-
-                        fn get_binding(this: &mut Resolver,
-                                       import_resolution: &ImportResolution,
-                                       namespace: Namespace,
-                                       source: Name)
-                                       -> ResolveResult<(Rc<Module>, NsDef)> {
-                            // Import resolutions must be declared with "pub"
-                            // in order to be exported.
-                            if !import_resolution[namespace].is_public {
-                                return Failed(None);
-                            }
-
-                            match import_resolution.target_for_namespace(namespace) {
-                                None => {
-                                    return Failed(None);
-                                }
-                                Some(Target {
-                                    target_module,
-                                    ns_def,
-                                    shadowable: _
-                                }) => {
-                                    debug!("(resolving single import) found import in ns {:?}",
-                                           namespace);
-                                    let id = import_resolution.id(namespace);
-                                    // track used imports and extern crates as well
-                                    this.used_imports.insert((id, namespace));
-                                    this.record_import_use(id, source);
-                                    match target_module.def_id() {
-                                        Some(DefId{krate: kid, ..}) => {
-                                            this.used_crates.insert(kid);
-                                        }
-                                        _ => {}
-                                    }
-                                    return Success((target_module, ns_def));
-                                }
-                            }
-                        }
-
                         // The name is an import which has been fully
                         // resolved. We can, therefore, just follow it.
                         if let Indeterminate = value_result {
-                            value_result = get_binding(self.resolver,
-                                                       import_resolution,
-                                                       ValueNS,
-                                                       source);
+                            value_result = self.get_binding(import_resolution, ValueNS, source);
                             value_used_reexport = import_resolution.value_ns.is_public;
                         }
                         if let Indeterminate = type_result {
-                            type_result = get_binding(self.resolver,
-                                                      import_resolution,
-                                                      TypeNS,
-                                                      source);
+                            type_result = self.get_binding(import_resolution, TypeNS, source);
                             type_used_reexport = import_resolution.type_ns.is_public;
                         }
 
