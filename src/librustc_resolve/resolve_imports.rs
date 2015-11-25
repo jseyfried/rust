@@ -447,45 +447,36 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         let mut pub_err = false;
 
         // We need to resolve both namespaces for this to succeed.
-        let mut value_result = self.resolve_name(&target_module, source, ValueNS,
+        let value_result = self.resolve_name(&target_module, source, ValueNS,
                                                  directive, &mut pub_err);
-        let mut type_result = self.resolve_name(&target_module, source, TypeNS,
+        let type_result = self.resolve_name(&target_module, source, TypeNS,
                                                 directive, &mut pub_err);
 
         // Unless we managed to find a result in both namespaces (unlikely),
         // search imports as well.
-        let mut value_used_reexport = false;
-        let mut type_used_reexport = false;
+        let value_used_reexport = &mut false;
+        let type_used_reexport = &mut false;
 
-        if let Indeterminate = value_result {
-            let (result, used_reexport) =
-                self.resolve_in_imports(&target_module, source, ValueNS, module_);
-            value_result = result;
-            value_used_reexport = used_reexport;
+        let value_result = value_result.or(|| {
+            self.resolve_in_imports(&target_module, source, ValueNS, module_, value_used_reexport)
+        });
+        if let Indeterminate = value_result { return Indeterminate }
 
-            if let Indeterminate = value_result { return Indeterminate }
-        }
-
-
-        if let Indeterminate = type_result {
-            let (result, used_reexport) =
-                self.resolve_in_imports(&target_module, source, TypeNS, module_);
-            type_result = result;
-            type_used_reexport = used_reexport;
-
-            if let Indeterminate = type_result { return Indeterminate }
-        }
+        let type_result = type_result.or(|| {
+            self.resolve_in_imports(&target_module, source, TypeNS, module_, type_used_reexport)
+        });
+        if let Indeterminate = type_result { return Indeterminate }
 
         let mut value_used_public = false;
         let mut type_used_public = false;
 
         // If we didn't find a result in the type namespace, search the
         // external modules.
-        match type_result {
-            Success(..) => {}
+        let type_result = match type_result {
+            Success(..) => type_result,
             _ => {
                 match target_module.external_module_children.borrow_mut().get(&source).cloned() {
-                    None => {} // Continue.
+                    None => type_result,
                     Some(module) => {
                         debug!("(resolving single import) found external module");
                         // track the module as used.
@@ -496,12 +487,12 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                             _ => {}
                         }
                         let ns_def = NsDef::create_from_module(module, None);
-                        type_result = Success((target_module.clone(), ns_def));
                         type_used_public = true;
+                        Success((target_module.clone(), ns_def))
                     }
                 }
             }
-        }
+        };
 
         // We've successfully resolved the import. Write the results in.
         self.check_and_write_import(module_, directive, target,
@@ -516,8 +507,8 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             return Failed(Some((directive.span, msg)));
         }
 
-        let value_used_public = value_used_reexport || value_used_public;
-        let type_used_public = type_used_reexport || type_used_public;
+        let value_used_public = *value_used_reexport || value_used_public;
+        let type_used_public = *type_used_reexport || type_used_public;
 
         self.record_import_resolution(module_, directive, target, ValueNS, value_used_public, lp);
         self.record_import_resolution(module_, directive, target, TypeNS, type_used_public, lp);
@@ -530,27 +521,28 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                           module: &Module,
                           name: Name,
                           ns: Namespace,
-                          origin_module: &Module)
-                          -> (ResolveResult<(Rc<Module>, NsDef)>, bool) {
+                          origin_module: &Module, used: &mut bool)
+                          -> ResolveResult<(Rc<Module>, NsDef)> {
         // If there is an unresolved glob at this point in the
         // containing module, bail out. We don't know enough to be
         // able to resolve this import.
-
         if module.pub_glob_count.get() > 0 {
             debug!("(resolving single import) unresolved pub glob; bailing out");
-            return (Indeterminate, false);
+            return Indeterminate;
         }
 
         // Now search the exported imports within the containing module.
         match module.import_resolutions.borrow().get(&(name, ns)) {
             // The containing module definitely doesn't have an exported import with the name
             // in question. We can therecore accurately report that the names are unbound.
-            None => (Failed(None), false),
+            None => Failed(None),
 
             // The name is an import which has been fully resolved.
             // We can, therefore, just follow it.
-            Some(import_resolution) if import_resolution.outstanding_references == 0 =>
-                (self.get_binding(import_resolution, ns, name), import_resolution.is_public),
+            Some(import_resolution) if import_resolution.outstanding_references == 0 => {
+                *used = import_resolution.is_public;
+                self.get_binding(import_resolution, ns, name)
+            },
 
             // If module is the same as the original module whose import we are resolving and
             // there it has an unresolved import with the same name as `source`, then the user
@@ -563,8 +555,8 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             // In this case we continue as if we resolved the import and let
             // check_for_conflicts_between_imports_and_items handle the conflict.
             Some(_) => match (origin_module.def_id(), module.def_id()) {
-                (Some(id1), Some(id2)) if id1 == id2 => (Failed(None), false),
-                _ => (Indeterminate, false),
+                (Some(id1), Some(id2)) if id1 == id2 => Failed(None),
+                _ => Indeterminate,
             },
         }
     }

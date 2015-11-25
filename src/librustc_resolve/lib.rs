@@ -617,7 +617,7 @@ impl<T> ResolveResult<T> {
         }
     }
 
-    fn or<F: Fn() -> Self>(self, f: F) -> Self {
+    fn or<F: FnOnce() -> Self>(self, f: F) -> Self {
         match self {
             Indeterminate => f(),
             _ => self,
