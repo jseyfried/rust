@@ -398,10 +398,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
 
         // Now search the exported imports within the containing module.
         let result = match module.import_resolutions.borrow().get(&(name, ns)) {
-            // The containing module definitely doesn't have an exported import with the name
-            // in question. We can therecore accurately report that the names are unbound.
-            None => Failed(None),
-
             // Import resolutions must be declared with "pub" in order to be exported.
             Some(import_resolution) if !import_resolution.is_public => Failed(None),
 
@@ -435,13 +431,12 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             //
             // In this case we continue as if we resolved the import and let
             // check_for_conflicts_between_imports_and_items handle the conflict.
-            Some(_) => match (origin_module.def_id(), module.def_id()) {
-                (Some(id1), Some(id2)) if id1 == id2 => Failed(None),
-                _ => Indeterminate,
-            },
-        };
+            Some(_) if origin_module.def_id() != module.def_id() => return Indeterminate,
 
-        if let Indeterminate = result { return Indeterminate }
+            // The containing module definitely doesn't have an exported import with the name
+            // in question. We can therecore accurately report that the names are unbound.
+            _ => Failed(None),
+        };
 
         // If we didn't find a result in the type namespace, search the
         // external modules.
