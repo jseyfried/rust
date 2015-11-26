@@ -616,13 +616,6 @@ impl<T> ResolveResult<T> {
             _ => false,
         }
     }
-
-    fn or<F: FnOnce() -> Self>(self, f: F) -> Self {
-        match self {
-            Indeterminate => f(),
-            _ => self,
-        }
-    }
 }
 
 enum FallbackSuggestion {

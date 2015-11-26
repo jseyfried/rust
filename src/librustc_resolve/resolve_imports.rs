@@ -474,18 +474,18 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             }
         }
 
-        let result = result.or(|| {
+        if let Success(_) = result { return (result, used_reexport) }
 
         // If there is an unresolved glob at this point in the
         // containing module, bail out. We don't know enough to be
         // able to resolve this import.
         if module.pub_glob_count.get() > 0 {
             debug!("(resolving single import) unresolved pub glob; bailing out");
-            return Indeterminate;
+            return (Indeterminate, used_reexport);
         }
 
         // Now search the exported imports within the containing module.
-        match module.import_resolutions.borrow().get(&(name, ns)) {
+        let result = match module.import_resolutions.borrow().get(&(name, ns)) {
             // The containing module definitely doesn't have an exported import with the name
             // in question. We can therecore accurately report that the names are unbound.
             None => Failed(None),
@@ -511,9 +511,8 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                 (Some(id1), Some(id2)) if id1 == id2 => Failed(None),
                 _ => Indeterminate,
             },
-        }
+        };
 
-        });
         if let Indeterminate = result { return (Indeterminate, used_reexport) }
 
         // If we didn't find a result in the type namespace, search the
