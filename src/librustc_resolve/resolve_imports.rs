@@ -515,11 +515,39 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
 
     fn do_write(&mut self, directive: &ImportDirective, module: &Module, name: Name, ns: Namespace,
                 result: &ResolveResult<(Rc<Module>, NsDef)>, used_reexport: bool, lp: LastPrivate){
-        let lp = match lp { LastMod(lp) => lp, LastImport {..} => panic!() };
-        let used_public = self.check_and_write_import(module, directive, name, ns, &result);
-        let used_public = used_reexport || used_public;
         let mut import_resolutions = module.import_resolutions.borrow_mut();
         let import_resolution = import_resolutions.get_mut(&(name, ns)).unwrap();
+
+        let ns_name = match ns { TypeNS => "type", ValueNS => "value" };
+
+        let used_public = match *result {
+            Success((ref target_module, ref ns_def)) => {
+                debug!("(resolving single import) found {:?} target: {:?}", ns_name, ns_def.def());
+                self.check_for_conflicting_import(&import_resolution, directive.span, name, ns);
+
+                self.check_that_import_is_importable(ns_def, directive.span, name);
+
+                let target = Target::new(target_module.clone(),
+                                         ns_def.clone(),
+                                         directive.shadowable);
+                import_resolution.target = Some(target);
+                import_resolution.id = directive.id;
+                import_resolution.is_public = directive.is_public;
+
+                ns_def.is_public()
+            }
+            Failed(_) => false,
+            Indeterminate => {
+                panic!("{:?} result should be known at this point", ns_name);
+            }
+        };
+
+        self.check_for_conflicts_between_imports_and_items(module,
+                                                           import_resolution,
+                                                           directive.span,
+                                                           (name, ns));
+
+        let used_public = used_reexport || used_public;
 
         assert!(import_resolution.outstanding_references >= 1);
         import_resolution.outstanding_references -= 1;
@@ -530,7 +558,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         };
 
         let priv_dep = if used_public {
-            lp
+            match lp { LastMod(lp) => lp, LastImport {..} => panic!() }
         } else {
             DependsOn(def.def_id())
         };
@@ -554,51 +582,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             },
             _ => panic!("Expected LastImport"),
         }
-    }
-
-    fn check_and_write_import(&mut self,
-                              module: &Module,
-                              directive: &ImportDirective,
-                              target: Name,
-                              ns: Namespace,
-                              result: &ResolveResult<(Rc<Module>, NsDef)>) -> bool {
-        let mut import_resolutions = module.import_resolutions.borrow_mut();
-        let import_resolution = import_resolutions.get_mut(&(target, ns)).unwrap();
-
-        let ns_name = match ns { TypeNS => "type", ValueNS => "value" };
-
-        let used_public = match *result {
-            Success((ref target_module, ref ns_def)) => {
-                debug!("(resolving single import) found {:?} target: {:?}",
-                       ns_name,
-                       ns_def.def());
-                self.check_for_conflicting_import(&import_resolution,
-                                                  directive.span,
-                                                  target, ns);
-
-                self.check_that_import_is_importable(ns_def, directive.span, target);
-
-                let target = Target::new(target_module.clone(),
-                                         ns_def.clone(),
-                                         directive.shadowable);
-                import_resolution.target = Some(target);
-                import_resolution.id = directive.id;
-                import_resolution.is_public = directive.is_public;
-
-                ns_def.is_public()
-            }
-            Failed(_) => false,
-            Indeterminate => {
-                panic!("{:?} result should be known at this point", ns_name);
-            }
-        };
-
-        self.check_for_conflicts_between_imports_and_items(module,
-                                                           import_resolution,
-                                                           directive.span,
-                                                           (target, ns));
-
-        used_public
     }
 
     // Resolves a glob import. Note that this function cannot fail; it either
