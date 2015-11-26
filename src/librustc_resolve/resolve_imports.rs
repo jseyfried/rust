@@ -409,15 +409,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         return Success(());
     }
 
-    fn do_write(&mut self, directive: &ImportDirective, module: &Module, name: Name, ns: Namespace,
-                result: &ResolveResult<(Rc<Module>, NsDef)>, used_reexport: bool, lp: LastPrivate){
-        let lp = match lp { LastMod(lp) => lp, LastImport {..} => panic!() };
-        let used_public = self.check_and_write_import(module, directive, name, ns, &result);
-        let used_public = used_reexport || used_public;
-        self.record_import_resolution(module, directive, name, ns, used_public, lp);
-    }
-
-
     fn do_resolve(&mut self, module: &Rc<Module>, name: Name, ns: Namespace,
                   origin_module: &Module, directive: &ImportDirective, pub_err: &mut bool)
                   -> (ResolveResult<(Rc<Module>, NsDef)>, bool) {
@@ -522,6 +513,49 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         }, used_reexport)
     }
 
+    fn do_write(&mut self, directive: &ImportDirective, module: &Module, name: Name, ns: Namespace,
+                result: &ResolveResult<(Rc<Module>, NsDef)>, used_reexport: bool, lp: LastPrivate){
+        let lp = match lp { LastMod(lp) => lp, LastImport {..} => panic!() };
+        let used_public = self.check_and_write_import(module, directive, name, ns, &result);
+        let used_public = used_reexport || used_public;
+        let mut import_resolutions = module.import_resolutions.borrow_mut();
+        let import_resolution = import_resolutions.get_mut(&(name, ns)).unwrap();
+
+        assert!(import_resolution.outstanding_references >= 1);
+        import_resolution.outstanding_references -= 1;
+
+        let def = match import_resolution.target {
+            Some(ref target) => target.ns_def.def().unwrap(),
+            None => return,
+        };
+
+        let priv_dep = if used_public {
+            lp
+        } else {
+            DependsOn(def.def_id())
+        };
+
+        let mut def_map = self.resolver.def_map.borrow_mut();
+        let mut resolution = def_map.entry(directive.id).or_insert_with(|| {
+            PathResolution {
+                base_def: def,
+                last_private: LastImport {
+                    value_priv: None, value_used: Used, type_priv: None, type_used: Used,
+                },
+                depth: 0,
+            }
+        });
+
+        if let TypeNS = ns { resolution.base_def = def; }
+        match resolution.last_private {
+            LastImport { ref mut value_priv, ref mut type_priv, .. } => match ns {
+                ValueNS => { *value_priv = Some(priv_dep); }
+                TypeNS => { *type_priv = Some(priv_dep); }
+            },
+            _ => panic!("Expected LastImport"),
+        }
+    }
+
     fn check_and_write_import(&mut self,
                               module: &Module,
                               directive: &ImportDirective,
@@ -565,51 +599,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                                            (target, ns));
 
         used_public
-    }
-
-    fn record_import_resolution(&self,
-                                module: &Module,
-                                directive: &ImportDirective,
-                                target: Name,
-                                ns: Namespace,
-                                used_public: bool,
-                                lp: PrivateDep) {
-        let mut import_resolutions = module.import_resolutions.borrow_mut();
-        let import_resolution = import_resolutions.get_mut(&(target, ns)).unwrap();
-
-        assert!(import_resolution.outstanding_references >= 1);
-        import_resolution.outstanding_references -= 1;
-
-        let def = match import_resolution.target {
-            Some(ref target) => target.ns_def.def().unwrap(),
-            None => return,
-        };
-
-        let priv_dep = if used_public {
-            lp
-        } else {
-            DependsOn(def.def_id())
-        };
-
-        let mut def_map = self.resolver.def_map.borrow_mut();
-        let mut resolution = def_map.entry(directive.id).or_insert_with(|| {
-            PathResolution {
-                base_def: def,
-                last_private: LastImport {
-                    value_priv: None, value_used: Used, type_priv: None, type_used: Used,
-                },
-                depth: 0,
-            }
-        });
-
-        if let TypeNS = ns { resolution.base_def = def; }
-        match resolution.last_private {
-            LastImport { ref mut value_priv, ref mut type_priv, .. } => match ns {
-                ValueNS => { *value_priv = Some(priv_dep); }
-                TypeNS => { *type_priv = Some(priv_dep); }
-            },
-            _ => panic!("Expected LastImport"),
-        }
     }
 
     // Resolves a glob import. Note that this function cannot fail; it either
