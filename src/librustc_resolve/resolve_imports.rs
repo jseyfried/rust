@@ -445,55 +445,15 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
 
         // pub_err makes sure we don't give the same error twice.
         let mut pub_err = false;
-        let value_used_reexport = &mut false;
-        let type_used_reexport = &mut false;
-        let mut value_used_public = false;
-        let mut type_used_public = false;
 
         // We need to resolve both namespaces for this to succeed.
-        let value_result = self.resolve_name(&target_module, source, ValueNS,
-                                                 directive, &mut pub_err);
-        let value_result = value_result.or(|| {
-            self.resolve_in_imports(&target_module, source, ValueNS, module_, value_used_reexport)
-        });
+        let (value_result, value_used_reexport) =
+            self.do_resolve(&target_module, source, ValueNS, module_, directive, &mut pub_err);
         if let Indeterminate = value_result { return Indeterminate }
 
-        let type_result = self.resolve_name(&target_module, source, TypeNS,
-                                                directive, &mut pub_err);
-        let type_result = type_result.or(|| {
-            self.resolve_in_imports(&target_module, source, TypeNS, module_, type_used_reexport)
-        });
+        let (type_result, type_used_reexport) =
+            self.do_resolve(&target_module, source, TypeNS, module_, directive, &mut pub_err);
         if let Indeterminate = type_result { return Indeterminate }
-
-        // If we didn't find a result in the type namespace, search the
-        // external modules.
-        let type_result = match type_result {
-            Success(..) => type_result,
-            _ => {
-                match target_module.external_module_children.borrow_mut().get(&source).cloned() {
-                    None => type_result,
-                    Some(module) => {
-                        debug!("(resolving single import) found external module");
-                        // track the module as used.
-                        match module.def_id() {
-                            Some(DefId{krate: kid, ..}) => {
-                                self.resolver.used_crates.insert(kid);
-                            }
-                            _ => {}
-                        }
-                        let ns_def = NsDef::create_from_module(module, None);
-                        type_used_public = true;
-                        Success((target_module.clone(), ns_def))
-                    }
-                }
-            }
-        };
-
-        // We've successfully resolved the import. Write the results in.
-        self.check_and_write_import(module_, directive, target,
-                                    ValueNS, &value_result, &mut value_used_public);
-        self.check_and_write_import(module_, directive, target,
-                                    TypeNS, &type_result, &mut type_used_public);
 
         if value_result.failed() && type_result.failed() {
             let msg = format!("There is no `{}` in `{}`",
@@ -502,15 +462,56 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             return Failed(Some((directive.span, msg)));
         }
 
-        let value_used_public = *value_used_reexport || value_used_public;
-        let type_used_public = *type_used_reexport || type_used_public;
-
+        // We've successfully resolved the import. Write the results in.
+        let value_used_public = self.check_and_write_import(module_, directive, target,
+                                    ValueNS, &value_result);
+        let value_used_public = value_used_reexport || value_used_public;
         self.record_import_resolution(module_, directive, target, ValueNS, value_used_public, lp);
+
+        let type_used_public = self.check_and_write_import(module_, directive, target,
+                                    TypeNS, &type_result);
+        let type_used_public = type_used_reexport || type_used_public;
         self.record_import_resolution(module_, directive, target, TypeNS, type_used_public, lp);
 
         debug!("(resolving single import) successfully resolved import");
         return Success(());
     }
+
+    fn do_resolve(&mut self, module: &Rc<Module>, name: Name, ns: Namespace,
+                  origin_module: &Module, directive: &ImportDirective, pub_err: &mut bool)
+                  -> (ResolveResult<(Rc<Module>, NsDef)>, bool) {
+        let mut used_reexport = false;
+
+        let result = self.resolve_name(module, name, ns, directive, pub_err);
+        let result = result.or(|| {
+            self.resolve_in_imports(module, name, ns, origin_module, &mut used_reexport)
+        });
+        if let Indeterminate = result { return (Indeterminate, used_reexport) }
+
+        // If we didn't find a result in the type namespace, search the
+        // external modules.
+        (match result {
+            Failed(_) if ns == TypeNS => {
+                match module.external_module_children.borrow_mut().get(&name).cloned() {
+                    None => result,
+                    Some(result_module) => {
+                        debug!("(resolving single import) found external module");
+                        // track the module as used.
+                        match result_module.def_id() {
+                            Some(DefId { krate: kid, .. }) => {
+                                self.resolver.used_crates.insert(kid);
+                            }
+                            _ => {}
+                        }
+                        let ns_def = NsDef::create_from_module(result_module, None);
+                        Success((module.clone(), ns_def))
+                    }
+                }
+            }
+            _ => result,
+        }, used_reexport)
+    }
+
 
     fn resolve_in_imports(&mut self,
                           module: &Module,
@@ -561,14 +562,13 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                               directive: &ImportDirective,
                               target: Name,
                               ns: Namespace,
-                              result: &ResolveResult<(Rc<Module>, NsDef)>,
-                              used_public: &mut bool) {
+                              result: &ResolveResult<(Rc<Module>, NsDef)>) -> bool {
         let mut import_resolutions = module.import_resolutions.borrow_mut();
         let import_resolution = import_resolutions.get_mut(&(target, ns)).unwrap();
 
         let ns_name = match ns { TypeNS => "type", ValueNS => "value" };
 
-        match *result {
+        let used_public = match *result {
             Success((ref target_module, ref ns_def)) => {
                 debug!("(resolving single import) found {:?} target: {:?}",
                        ns_name,
@@ -586,20 +586,20 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                 import_resolution.id = directive.id;
                 import_resolution.is_public = directive.is_public;
 
-                *used_public = ns_def.is_public();
+                ns_def.is_public()
             }
-            Failed(_) => {
-                // Continue.
-            }
+            Failed(_) => false,
             Indeterminate => {
                 panic!("{:?} result should be known at this point", ns_name);
             }
-        }
+        };
 
         self.check_for_conflicts_between_imports_and_items(module,
                                                            import_resolution,
                                                            directive.span,
                                                            (target, ns));
+
+        used_public
     }
 
     fn record_import_resolution(&self,
