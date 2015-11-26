@@ -319,23 +319,8 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             Some((containing_module, lp)) => {
                 // We found the module that the target is contained
                 // within. Attempt to resolve the import within it.
-
-                match import_directive.subclass {
-                    SingleImport(target, source) => {
-                        resolution_result = self.resolve_single_import(&module_,
-                                                                       containing_module,
-                                                                       target,
-                                                                       source,
-                                                                       import_directive,
-                                                                       lp);
-                    }
-                    GlobImport => {
-                        resolution_result = self.resolve_glob_import(&module_,
-                                                                     containing_module,
-                                                                     import_directive,
-                                                                     lp);
-                    }
-                }
+                resolution_result =
+                    self.resolve_directive(&module_, containing_module, import_directive, lp);
             }
         }
 
@@ -374,24 +359,27 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         return resolution_result;
     }
 
-    fn resolve_single_import(&mut self,
-                             module_: &Module,
-                             target_module: Rc<Module>,
-                             target: Name,
-                             source: Name,
-                             directive: &ImportDirective,
-                             lp: LastPrivate)
-                             -> ResolveResult<()> {
+    fn resolve_directive(&mut self,
+                         module_: &Module,
+                         target_module: Rc<Module>,
+                         directive: &ImportDirective,
+                         lp: LastPrivate)
+                         -> ResolveResult<()> {
+        let (target, source) = if let SingleImport(target, source) = directive.subclass {
+            (target, source)
+        } else {
+            return self.resolve_glob_import(&module_, target_module, directive, lp);
+        };
+
         // pub_err makes sure we don't give the same error twice.
         let mut pub_err = false;
+        let (mut value_used_reexport, mut type_used_reexport) = (false, false);
 
         // We need to resolve both namespaces for this to succeed.
-        let mut value_used_reexport = false;
         let value_result =
             self.do_resolve(&target_module, source, ValueNS, module_, directive, &mut pub_err, &mut value_used_reexport);
         if let Indeterminate = value_result { return Indeterminate }
 
-        let mut type_used_reexport = false;
         let type_result =
             self.do_resolve(&target_module, source, TypeNS, module_, directive, &mut pub_err, &mut type_used_reexport);
         if let Indeterminate = type_result { return Indeterminate }
