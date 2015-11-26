@@ -374,33 +374,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         return resolution_result;
     }
 
-    fn get_binding(&mut self,
-                   import_resolution: &ImportResolution,
-                   namespace: Namespace,
-                   source: Name)
-                   -> ResolveResult<(Rc<Module>, NsDef)> {
-        // Import resolutions must be declared with "pub"
-        // in order to be exported.
-        if !import_resolution.is_public {
-            return Failed(None);
-        }
-
-        match import_resolution.target.clone() {
-            None => Failed(None),
-            Some(Target { target_module, ns_def, shadowable: _ }) => {
-                debug!("(resolving single import) found import in ns {:?}", namespace);
-                let id = import_resolution.id;
-                // track used imports and extern crates as well
-                self.resolver.used_imports.insert((id, namespace));
-                self.resolver.record_import_use(id, source);
-                if let Some(DefId { krate, .. }) = target_module.def_id() {
-                    self.resolver.used_crates.insert(krate);
-                }
-                Success((target_module, ns_def))
-            }
-        }
-    }
-
     fn resolve_single_import(&mut self,
                              module_: &Module,
                              target_module: Rc<Module>,
@@ -485,10 +458,26 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             // in question. We can therecore accurately report that the names are unbound.
             None => (Failed(None), false),
 
+            // Import resolutions must be declared with "pub" in order to be exported.
+            Some(import_resolution) if !import_resolution.is_public => (Failed(None), false),
+
             // The name is an import which has been fully resolved.
             // We can, therefore, just follow it.
             Some(import_resolution) if import_resolution.outstanding_references == 0 => {
-                (self.get_binding(import_resolution, ns, name), import_resolution.is_public)
+                match import_resolution.target.clone() {
+                    None => (Failed(None), true),
+                    Some(Target { target_module, ns_def, shadowable: _ }) => {
+                        debug!("(resolving single import) found import in ns {:?}", ns);
+                        let id = import_resolution.id;
+                        // track used imports and extern crates as well
+                        self.resolver.used_imports.insert((id, ns));
+                        self.resolver.record_import_use(id, name);
+                        if let Some(DefId { krate, .. }) = target_module.def_id() {
+                            self.resolver.used_crates.insert(krate);
+                        }
+                        (Success((target_module, ns_def)), true)
+                    }
+                }
             },
 
             // If module is the same as the original module whose import we are resolving and
