@@ -416,9 +416,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         // Search for direct children of the containing module.
         build_reduced_graph::populate_module_if_necessary(self.resolver, module);
         if let Some(ns_def) = module.get_child(name, ns) {
-            debug!("(resolving single import) found {} binding",
-                   match ns { ValueNS => "value", TypeNS => "type" });
-
+            debug!("(resolving single import) found {} binding", ns.as_str());
             if !*pub_err && directive.is_public && !ns_def.is_public() {
                 let msg = format!("`{}` is private, and cannot be reexported", name);
                 let note_msg = if let ValueNS = ns {
@@ -518,13 +516,13 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         let mut import_resolutions = module.import_resolutions.borrow_mut();
         let import_resolution = import_resolutions.get_mut(&(name, ns)).unwrap();
 
-        let ns_name = match ns { TypeNS => "type", ValueNS => "value" };
-
         let used_public = match *result {
             Success((ref target_module, ref ns_def)) => {
-                debug!("(resolving single import) found {:?} target: {:?}", ns_name, ns_def.def());
-                self.check_for_conflicting_import(&import_resolution, directive.span, name, ns);
+                debug!("(resolving single import) found {:?} target: {:?}",
+                       ns.as_str(),
+                       ns_def.def());
 
+                self.check_for_conflicting_import(&import_resolution, directive.span, name, ns);
                 self.check_that_import_is_importable(ns_def, directive.span, name);
 
                 let target = Target::new(target_module.clone(),
@@ -712,15 +710,10 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         let modifier = DefModifiers::IMPORTABLE | DefModifiers::PUBLIC;
 
         if ns_def.defined_with(modifier) {
-            let namespace_name = match namespace {
-                TypeNS => "type",
-                ValueNS => "value",
-            };
-            debug!("(resolving glob import) ... for {} target", namespace_name);
+            debug!("(resolving glob import) ... for {} target", namespace.as_str());
             if dest_import_resolution.shadowable() == Shadowable::Never {
-                let msg = format!("a {} named `{}` has already been imported in this \
-                                   module",
-                                 namespace_name,
+                let msg = format!("a {} named `{}` has already been imported in this module",
+                                 namespace.as_str(),
                                  name);
                span_err!(self.resolver.session,
                          import_directive.span,

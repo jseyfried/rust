@@ -502,6 +502,12 @@ pub enum Namespace {
     ValueNS,
 }
 
+impl Namespace {
+    fn as_str(self) -> &'static str {
+        match self { TypeNS => "type", ValueNS => "value" }
+    }
+}
+
 impl<'a, 'v, 'tcx> Visitor<'v> for Resolver<'a, 'tcx> {
     fn visit_nested_item(&mut self, item: hir::ItemId) {
         self.visit_item(self.ast_map.expect_item(item.id))
