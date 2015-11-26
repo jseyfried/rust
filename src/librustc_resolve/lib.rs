@@ -608,22 +608,6 @@ enum ResolveResult<T> {
     Success(T), // Successfully resolved the import.
 }
 
-impl<T> ResolveResult<T> {
-    fn success(&self) -> bool {
-        match *self {
-            Success(_) => true,
-            _ => false,
-        }
-    }
-
-    fn failed(&self) -> bool {
-        match *self {
-            Failed(_) => true,
-            _ => false,
-        }
-    }
-}
-
 enum FallbackSuggestion {
     NoSuggestion,
     Field,

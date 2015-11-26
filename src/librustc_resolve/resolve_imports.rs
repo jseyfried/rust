@@ -285,66 +285,30 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                  module_: Rc<Module>,
                                  import_directive: &ImportDirective)
                                  -> ResolveResult<()> {
-        let module_path = &import_directive.module_path;
-
         debug!("(resolving import for module) resolving import `{}::...` in `{}`",
-               names_to_string(&module_path[..]),
+               names_to_string(&import_directive.module_path[..]),
                module_to_string(&*module_));
 
-        // First, resolve the module path for the directive, if necessary.
-        let resolution_result = if module_path.is_empty() {
+        // Resolve the module path for the directive, if necessary.
+        if import_directive.module_path.is_empty() {
             // Use the crate root.
             let root = self.resolver.graph_root.clone();
             self.resolve_directive(&module_, root, import_directive, LastMod(AllPublic))
         } else {
             match self.resolver.resolve_module_path(module_.clone(),
-                                                    &module_path[..],
+                                                    &import_directive.module_path[..],
                                                     UseLexicalScopeFlag::DontUseLexicalScope,
                                                     import_directive.span,
                                                     NameSearchType::ImportSearch) {
                 Failed(err) => Failed(err),
                 Indeterminate => Indeterminate,
 
-                // We found the module that the target is contained
-                // within. Attempt to resolve the import within it.
+                // We found the module that the target is contained within.
+                // Attempt to resolve the import within it.
                 Success((containing_module, lp)) =>
                     self.resolve_directive(&module_, containing_module, import_directive, lp)
             }
-        };
-
-        // Decrement the count of unresolved imports.
-        match resolution_result {
-            ResolveResult::Success(()) => {
-                assert!(self.resolver.unresolved_imports >= 1);
-                self.resolver.unresolved_imports -= 1;
-            }
-            _ => {
-                // Nothing to do here; just return the error.
-            }
         }
-
-        // Decrement the count of unresolved globs if necessary. But only if
-        // the resolution result is a success -- other cases will
-        // be handled by the main loop.
-
-        if resolution_result.success() {
-            match import_directive.subclass {
-                GlobImport => {
-                    module_.dec_glob_count();
-                    if import_directive.is_public {
-                        module_.dec_pub_glob_count();
-                    }
-                }
-                SingleImport(..) => {
-                    // Ignore.
-                }
-            }
-            if import_directive.is_public {
-                module_.dec_pub_count();
-            }
-        }
-
-        return resolution_result;
     }
 
     fn resolve_directive(&mut self,
@@ -372,7 +336,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             self.do_resolve(&target_module, source, TypeNS, module_, directive, &mut pub_err, &mut type_used_reexport);
         if let Indeterminate = type_result { return Indeterminate }
 
-        if value_result.failed() && type_result.failed() {
+        if let (&Failed(_), &Failed(_)) = (&value_result, &type_result) {
             let msg = format!("There is no `{}` in `{}`",
                               source,
                               module_to_string(&target_module));
@@ -384,7 +348,15 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         self.do_write(directive, module_, target, TypeNS, &type_result, type_used_reexport, lp);
 
         debug!("(resolving single import) successfully resolved import");
-        return Success(());
+
+        // Decrement the count of unresolved imports.
+        assert!(self.resolver.unresolved_imports >= 1);
+        self.resolver.unresolved_imports -= 1;
+        if directive.is_public {
+            module_.dec_pub_count();
+        }
+
+        Success(())
     }
 
     fn do_resolve(&mut self,
@@ -666,8 +638,17 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                                       });
         }
 
+        // Decrement the count of unresolved imports and globls.
+        assert!(self.resolver.unresolved_imports >= 1);
+        self.resolver.unresolved_imports -= 1;
+        module_.dec_glob_count();
+        if import_directive.is_public {
+            module_.dec_pub_count();
+            module_.dec_pub_glob_count();
+        }
+
         debug!("(resolving glob import) successfully resolved import");
-        return Success(());
+        Success(())
     }
 
     fn merge_import_resolution(&mut self,
