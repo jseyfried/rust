@@ -441,8 +441,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                              directive: &ImportDirective,
                              lp: LastPrivate)
                              -> ResolveResult<()> {
-        let lp = match lp { LastMod(lp) => lp, LastImport {..} => panic!() };
-
         // pub_err makes sure we don't give the same error twice.
         let mut pub_err = false;
 
@@ -463,19 +461,21 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         }
 
         // We've successfully resolved the import. Write the results in.
-        let value_used_public = self.check_and_write_import(module_, directive, target,
-                                    ValueNS, &value_result);
-        let value_used_public = value_used_reexport || value_used_public;
-        self.record_import_resolution(module_, directive, target, ValueNS, value_used_public, lp);
-
-        let type_used_public = self.check_and_write_import(module_, directive, target,
-                                    TypeNS, &type_result);
-        let type_used_public = type_used_reexport || type_used_public;
-        self.record_import_resolution(module_, directive, target, TypeNS, type_used_public, lp);
+        self.do_write(directive, module_, target, ValueNS, &value_result, value_used_reexport, lp);
+        self.do_write(directive, module_, target, TypeNS, &type_result, type_used_reexport, lp);
 
         debug!("(resolving single import) successfully resolved import");
         return Success(());
     }
+
+    fn do_write(&mut self, directive: &ImportDirective, module: &Module, name: Name, ns: Namespace,
+                result: &ResolveResult<(Rc<Module>, NsDef)>, used_reexport: bool, lp: LastPrivate){
+        let lp = match lp { LastMod(lp) => lp, LastImport {..} => panic!() };
+        let used_public = self.check_and_write_import(module, directive, name, ns, &result);
+        let used_public = used_reexport || used_public;
+        self.record_import_resolution(module, directive, name, ns, used_public, lp);
+    }
+
 
     fn do_resolve(&mut self, module: &Rc<Module>, name: Name, ns: Namespace,
                   origin_module: &Module, directive: &ImportDirective, pub_err: &mut bool)
