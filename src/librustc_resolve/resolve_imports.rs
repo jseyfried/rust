@@ -386,12 +386,14 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         let mut pub_err = false;
 
         // We need to resolve both namespaces for this to succeed.
-        let (value_result, value_used_reexport) =
-            self.do_resolve(&target_module, source, ValueNS, module_, directive, &mut pub_err);
+        let mut value_used_reexport = false;
+        let value_result =
+            self.do_resolve(&target_module, source, ValueNS, module_, directive, &mut pub_err, &mut value_used_reexport);
         if let Indeterminate = value_result { return Indeterminate }
 
-        let (type_result, type_used_reexport) =
-            self.do_resolve(&target_module, source, TypeNS, module_, directive, &mut pub_err);
+        let mut type_used_reexport = false;
+        let type_result =
+            self.do_resolve(&target_module, source, TypeNS, module_, directive, &mut pub_err, &mut type_used_reexport);
         if let Indeterminate = type_result { return Indeterminate }
 
         if value_result.failed() && type_result.failed() {
@@ -409,10 +411,15 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         return Success(());
     }
 
-    fn do_resolve(&mut self, module: &Rc<Module>, name: Name, ns: Namespace,
-                  origin_module: &Module, directive: &ImportDirective, pub_err: &mut bool)
-                  -> (ResolveResult<(Rc<Module>, NsDef)>, bool) {
-
+    fn do_resolve(&mut self,
+                  module: &Rc<Module>,
+                  name: Name,
+                  ns: Namespace,
+                  origin_module: &Module,
+                  directive: &ImportDirective,
+                  pub_err: &mut bool,
+                  used_reexport: &mut bool)
+                  -> ResolveResult<(Rc<Module>, NsDef)> {
         // Search for direct children of the containing module.
         build_reduced_graph::populate_module_if_necessary(self.resolver, module);
         if let Some(ns_def) = module.get_child(name, ns) {
@@ -430,7 +437,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                 *pub_err = true;
             }
 
-            return (Success((module.clone(), ns_def.clone())), false);
+            return Success((module.clone(), ns_def.clone()));
         }
 
         // If there is an unresolved glob at this point in the
@@ -438,23 +445,24 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         // able to resolve this import.
         if module.pub_glob_count.get() > 0 {
             debug!("(resolving single import) unresolved pub glob; bailing out");
-            return (Indeterminate, false);
+            return Indeterminate;
         }
 
         // Now search the exported imports within the containing module.
-        let (result, used_reexport) = match module.import_resolutions.borrow().get(&(name, ns)) {
+        let result = match module.import_resolutions.borrow().get(&(name, ns)) {
             // The containing module definitely doesn't have an exported import with the name
             // in question. We can therecore accurately report that the names are unbound.
-            None => (Failed(None), false),
+            None => Failed(None),
 
             // Import resolutions must be declared with "pub" in order to be exported.
-            Some(import_resolution) if !import_resolution.is_public => (Failed(None), false),
+            Some(import_resolution) if !import_resolution.is_public => Failed(None),
 
             // The name is an import which has been fully resolved.
             // We can, therefore, just follow it.
             Some(import_resolution) if import_resolution.outstanding_references == 0 => {
+                *used_reexport = true;
                 match import_resolution.target.clone() {
-                    None => (Failed(None), true),
+                    None => Failed(None),
                     Some(Target { target_module, ns_def, shadowable: _ }) => {
                         debug!("(resolving single import) found import in ns {:?}", ns);
                         let id = import_resolution.id;
@@ -464,7 +472,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                         if let Some(DefId { krate, .. }) = target_module.def_id() {
                             self.resolver.used_crates.insert(krate);
                         }
-                        (Success((target_module, ns_def)), true)
+                        Success((target_module, ns_def))
                     }
                 }
             },
@@ -479,17 +487,17 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             //
             // In this case we continue as if we resolved the import and let
             // check_for_conflicts_between_imports_and_items handle the conflict.
-            Some(_) => (match (origin_module.def_id(), module.def_id()) {
+            Some(_) => match (origin_module.def_id(), module.def_id()) {
                 (Some(id1), Some(id2)) if id1 == id2 => Failed(None),
                 _ => Indeterminate,
-            }, false),
+            },
         };
 
-        if let Indeterminate = result { return (Indeterminate, used_reexport) }
+        if let Indeterminate = result { return Indeterminate }
 
         // If we didn't find a result in the type namespace, search the
         // external modules.
-        (match result {
+        match result {
             Failed(_) if ns == TypeNS => {
                 match module.external_module_children.borrow_mut().get(&name).cloned() {
                     None => result,
@@ -508,7 +516,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                 }
             }
             _ => result,
-        }, used_reexport)
+        }
     }
 
     fn do_write(&mut self, directive: &ImportDirective, module: &Module, name: Name, ns: Namespace,
@@ -536,7 +544,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             }
             Failed(_) => false,
             Indeterminate => {
-                panic!("{:?} result should be known at this point", ns_name);
+                panic!("{:?} result should be known at this point", ns.as_str());
             }
         };
 
