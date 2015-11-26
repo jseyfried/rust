@@ -401,38 +401,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         }
     }
 
-
-    fn resolve_name(&mut self, module: &Rc<Module>, name: Name, ns: Namespace,
-                    directive: &ImportDirective, pub_err: &mut bool)
-                    -> ResolveResult<(Rc<Module>, NsDef)> {
-        let mut result: ResolveResult<(Rc<Module>, NsDef)> = Indeterminate;
-
-        // Search for direct children of the containing module.
-        build_reduced_graph::populate_module_if_necessary(self.resolver, module);
-
-        if let Some(ns_def) = module.get_child(name, ns) {
-            debug!("(resolving single import) found {} binding",
-                   match ns { ValueNS => "value", TypeNS => "type" });
-
-            result = Success((module.clone(), ns_def.clone()));
-
-            if !*pub_err && directive.is_public && !ns_def.is_public() {
-                let msg = format!("`{}` is private, and cannot be reexported", name);
-                let note_msg = if let ValueNS = ns {
-                    span_err!(self.resolver.session, directive.span, E0364, "{}", &msg);
-                    format!("Consider marking `{}` as `pub` in the imported module", name)
-                } else {
-                    span_err!(self.resolver.session, directive.span, E0365, "{}", &msg);
-                    format!("Consider declaring module `{}` as a `pub mod`", name)
-                };
-                self.resolver.session.span_note(directive.span, &note_msg);
-                *pub_err = true;
-            }
-        }
-
-        result
-    }
-
     fn resolve_single_import(&mut self,
                              module_: &Module,
                              target_module: Rc<Module>,
@@ -481,10 +449,70 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                   origin_module: &Module, directive: &ImportDirective, pub_err: &mut bool)
                   -> (ResolveResult<(Rc<Module>, NsDef)>, bool) {
         let mut used_reexport = false;
+        let mut result: ResolveResult<(Rc<Module>, NsDef)> = Indeterminate;
 
-        let result = self.resolve_name(module, name, ns, directive, pub_err);
+        // Search for direct children of the containing module.
+        build_reduced_graph::populate_module_if_necessary(self.resolver, module);
+
+        if let Some(ns_def) = module.get_child(name, ns) {
+            debug!("(resolving single import) found {} binding",
+                   match ns { ValueNS => "value", TypeNS => "type" });
+
+            result = Success((module.clone(), ns_def.clone()));
+
+            if !*pub_err && directive.is_public && !ns_def.is_public() {
+                let msg = format!("`{}` is private, and cannot be reexported", name);
+                let note_msg = if let ValueNS = ns {
+                    span_err!(self.resolver.session, directive.span, E0364, "{}", &msg);
+                    format!("Consider marking `{}` as `pub` in the imported module", name)
+                } else {
+                    span_err!(self.resolver.session, directive.span, E0365, "{}", &msg);
+                    format!("Consider declaring module `{}` as a `pub mod`", name)
+                };
+                self.resolver.session.span_note(directive.span, &note_msg);
+                *pub_err = true;
+            }
+        }
+
         let result = result.or(|| {
-            self.resolve_in_imports(module, name, ns, origin_module, &mut used_reexport)
+
+        // If there is an unresolved glob at this point in the
+        // containing module, bail out. We don't know enough to be
+        // able to resolve this import.
+        if module.pub_glob_count.get() > 0 {
+            debug!("(resolving single import) unresolved pub glob; bailing out");
+            return Indeterminate;
+        }
+
+        // Now search the exported imports within the containing module.
+        match module.import_resolutions.borrow().get(&(name, ns)) {
+            // The containing module definitely doesn't have an exported import with the name
+            // in question. We can therecore accurately report that the names are unbound.
+            None => Failed(None),
+
+            // The name is an import which has been fully resolved.
+            // We can, therefore, just follow it.
+            Some(import_resolution) if import_resolution.outstanding_references == 0 => {
+                used_reexport = import_resolution.is_public;
+                self.get_binding(import_resolution, ns, name)
+            },
+
+            // If module is the same as the original module whose import we are resolving and
+            // there it has an unresolved import with the same name as `source`, then the user
+            // is actually trying to import an item that is declared in the same scope.
+            //
+            // e.g
+            // use self::submodule;
+            // pub mod submodule;
+            //
+            // In this case we continue as if we resolved the import and let
+            // check_for_conflicts_between_imports_and_items handle the conflict.
+            Some(_) => match (origin_module.def_id(), module.def_id()) {
+                (Some(id1), Some(id2)) if id1 == id2 => Failed(None),
+                _ => Indeterminate,
+            },
+        }
+
         });
         if let Indeterminate = result { return (Indeterminate, used_reexport) }
 
@@ -510,51 +538,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             }
             _ => result,
         }, used_reexport)
-    }
-
-
-    fn resolve_in_imports(&mut self,
-                          module: &Module,
-                          name: Name,
-                          ns: Namespace,
-                          origin_module: &Module, used: &mut bool)
-                          -> ResolveResult<(Rc<Module>, NsDef)> {
-        // If there is an unresolved glob at this point in the
-        // containing module, bail out. We don't know enough to be
-        // able to resolve this import.
-        if module.pub_glob_count.get() > 0 {
-            debug!("(resolving single import) unresolved pub glob; bailing out");
-            return Indeterminate;
-        }
-
-        // Now search the exported imports within the containing module.
-        match module.import_resolutions.borrow().get(&(name, ns)) {
-            // The containing module definitely doesn't have an exported import with the name
-            // in question. We can therecore accurately report that the names are unbound.
-            None => Failed(None),
-
-            // The name is an import which has been fully resolved.
-            // We can, therefore, just follow it.
-            Some(import_resolution) if import_resolution.outstanding_references == 0 => {
-                *used = import_resolution.is_public;
-                self.get_binding(import_resolution, ns, name)
-            },
-
-            // If module is the same as the original module whose import we are resolving and
-            // there it has an unresolved import with the same name as `source`, then the user
-            // is actually trying to import an item that is declared in the same scope.
-            //
-            // e.g
-            // use self::submodule;
-            // pub mod submodule;
-            //
-            // In this case we continue as if we resolved the import and let
-            // check_for_conflicts_between_imports_and_items handle the conflict.
-            Some(_) => match (origin_module.def_id(), module.def_id()) {
-                (Some(id1), Some(id2)) if id1 == id2 => Failed(None),
-                _ => Indeterminate,
-            },
-        }
     }
 
     fn check_and_write_import(&mut self,
