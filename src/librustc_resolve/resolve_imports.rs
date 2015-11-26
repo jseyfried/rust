@@ -285,7 +285,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                  module_: Rc<Module>,
                                  import_directive: &ImportDirective)
                                  -> ResolveResult<()> {
-        let mut resolution_result = ResolveResult::Failed(None);
         let module_path = &import_directive.module_path;
 
         debug!("(resolving import for module) resolving import `{}::...` in `{}`",
@@ -293,36 +292,25 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                module_to_string(&*module_));
 
         // First, resolve the module path for the directive, if necessary.
-        let container = if module_path.is_empty() {
+        let resolution_result = if module_path.is_empty() {
             // Use the crate root.
-            Some((self.resolver.graph_root.clone(), LastMod(AllPublic)))
+            let root = self.resolver.graph_root.clone();
+            self.resolve_directive(&module_, root, import_directive, LastMod(AllPublic))
         } else {
             match self.resolver.resolve_module_path(module_.clone(),
                                                     &module_path[..],
                                                     UseLexicalScopeFlag::DontUseLexicalScope,
                                                     import_directive.span,
                                                     NameSearchType::ImportSearch) {
-                ResolveResult::Failed(err) => {
-                    resolution_result = ResolveResult::Failed(err);
-                    None
-                }
-                ResolveResult::Indeterminate => {
-                    resolution_result = ResolveResult::Indeterminate;
-                    None
-                }
-                ResolveResult::Success(container) => Some(container),
-            }
-        };
+                Failed(err) => Failed(err),
+                Indeterminate => Indeterminate,
 
-        match container {
-            None => {}
-            Some((containing_module, lp)) => {
                 // We found the module that the target is contained
                 // within. Attempt to resolve the import within it.
-                resolution_result =
-                    self.resolve_directive(&module_, containing_module, import_directive, lp);
+                Success((containing_module, lp)) =>
+                    self.resolve_directive(&module_, containing_module, import_directive, lp)
             }
-        }
+        };
 
         // Decrement the count of unresolved imports.
         match resolution_result {
