@@ -1362,77 +1362,9 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                namespace,
                module_to_string(&*module_));
 
-        // The current module node is handled specially. First, check for
-        // its immediate children.
-        build_reduced_graph::populate_module_if_necessary(self, &module_);
-
-        if let Some(ns_def) = module_.get_child(name, namespace) {
-            debug!("top name bindings succeeded");
-            return Success((Target::new(module_.clone(), ns_def, Shadowable::Never), false));
-        }
-
-        // Now check for its import directives. We don't have to have resolved
-        // all its imports in the usual way; this is because chains of
-        // adjacent import statements are processed as though they mutated the
-        // current scope.
-        if let Some(import_resolution) = module_.import_resolutions.borrow().get(&(name, namespace)) {
-            match import_resolution.target.clone() {
-                None => {
-                    // Not found; continue.
-                    debug!("(resolving item in lexical scope) found import resolution, but not \
-                            in namespace {:?}",
-                           namespace);
-                }
-                Some(target) => {
-                    debug!("(resolving item in lexical scope) using import resolution");
-                    // track used imports and extern crates as well
-                    let id = import_resolution.id;
-                    self.used_imports.insert((id, namespace));
-                    self.record_import_use(id, name);
-                    if let Some(DefId{krate: kid, ..}) = target.target_module.def_id() {
-                        self.used_crates.insert(kid);
-                    }
-                    return Success((target, false));
-                }
-            }
-        }
-
-        // Search for external modules.
-        if namespace == TypeNS {
-            // FIXME (21114): In principle unclear `child` *has* to be lifted.
-            let child = module_.external_module_children.borrow().get(&name).cloned();
-            if let Some(module) = child {
-                let ns_def = NsDef::create_from_module(module, None);
-                debug!("lower name bindings succeeded");
-                return Success((Target::new(module_, ns_def, Shadowable::Never), false));
-            }
-        }
-
-        // Finally, proceed up the scope chain looking for parent modules.
+        // Proceed up the scope chain looking for parent modules.
         let mut search_module = module_;
         loop {
-            // Go to the next parent.
-            match search_module.parent_link.clone() {
-                NoParentLink => {
-                    // No more parents. This module was unresolved.
-                    debug!("(resolving item in lexical scope) unresolved module");
-                    return Failed(None);
-                }
-                ModuleParentLink(parent_module_node, _) => {
-                    if search_module.is_normal() {
-                        // We stop the search here.
-                        debug!("(resolving item in lexical scope) unresolved module: not \
-                                searching through module parents");
-                            return Failed(None);
-                    } else {
-                        search_module = parent_module_node.upgrade().unwrap();
-                    }
-                }
-                BlockParentLink(ref parent_module_node, _) => {
-                    search_module = parent_module_node.upgrade().unwrap();
-                }
-            }
-
             // Resolve the name in the parent module.
             match self.resolve_name_in_module(search_module.clone(),
                                               name,
@@ -1454,6 +1386,28 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                     // We found the module.
                     debug!("(resolving item in lexical scope) found name in module, done");
                     return Success((target, used_reexport));
+                }
+            }
+
+            // Go to the next parent.
+            match search_module.parent_link.clone() {
+                NoParentLink => {
+                    // No more parents. This module was unresolved.
+                    debug!("(resolving item in lexical scope) unresolved module");
+                    return Failed(None);
+                }
+                ModuleParentLink(parent_module_node, _) => {
+                    if search_module.is_normal() {
+                        // We stop the search here.
+                        debug!("(resolving item in lexical scope) unresolved module: not \
+                                searching through module parents");
+                            return Failed(None);
+                    } else {
+                        search_module = parent_module_node.upgrade().unwrap();
+                    }
+                }
+                BlockParentLink(ref parent_module_node, _) => {
+                    search_module = parent_module_node.upgrade().unwrap();
                 }
             }
         }
