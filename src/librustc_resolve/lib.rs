@@ -1557,6 +1557,94 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         return Failed(None);
     }
 
+    fn resolve_name_in_module_<F>(&mut self,
+                                  module: &Rc<Module>,
+                                  name: Name,
+                                  ns: Namespace,
+                                  fail_on_indeterminate_import: bool,
+                                  allow_private_imports: bool,
+                                  error: F)
+                                  -> ResolveResult<(Target, bool)>
+        where F: FnOnce()
+    {
+        // Search for direct children of the containing module.
+        build_reduced_graph::populate_module_if_necessary(self, module);
+        if let Some(ns_def) = module.get_child(name, ns) {
+            if !ns_def.is_public() { error() }
+            return Success((Target::new(module.clone(), ns_def, Shadowable::Never), false));
+        }
+
+        // If there is an unresolved glob at this point in the
+        // containing module, bail out. We don't know enough to be
+        // able to resolve this import.
+        if module.pub_glob_count.get() > 0 { return Indeterminate; }
+
+        // Now search the exported imports within the containing module.
+        let result = match module.import_resolutions.borrow().get(&(name, ns)) {
+            // Import resolutions must be declared with "pub" in order to be exported.
+            Some(import_resolution) if !import_resolution.is_public &&
+                                       !allow_private_imports => Failed(None),
+
+            // The name is an import which has been fully resolved.
+            // We can, therefore, just follow it.
+            Some(import_resolution) if import_resolution.outstanding_references == 0 || !import_resolution.is_public => {
+                match import_resolution.target.clone() {
+                    None => Failed(None),
+                    Some(target) => {
+                        debug!("(resolving single import) found import in ns {:?}", ns);
+                        let id = import_resolution.id;
+                        // track used imports and extern crates as well
+                        self.used_imports.insert((id, ns));
+                        self.record_import_use(id, name);
+                        if let Some(DefId { krate, .. }) = target.target_module.def_id() {
+                            self.used_crates.insert(krate);
+                        }
+                        Success((target, true))
+                    }
+                }
+            },
+
+            // If module is the same as the original module whose import we are resolving and
+            // there it has an unresolved import with the same name as `source`, then the user
+            // is actually trying to import an item that is declared in the same scope.
+            //
+            // e.g
+            // use self::submodule;
+            // pub mod submodule;
+            //
+            // In this case we continue as if we resolved the import and let
+            // check_for_conflicts_between_imports_and_items handle the conflict.
+            Some(_) if !fail_on_indeterminate_import => return Indeterminate,
+
+            // The containing module definitely doesn't have an exported import with the name
+            // in question. We can therecore accurately report that the names are unbound.
+            _ => Failed(None),
+        };
+
+        // If we didn't find a result in the type namespace, search the
+        // external modules.
+        match result {
+            Failed(_) if ns == TypeNS => {
+                match module.external_module_children.borrow_mut().get(&name).cloned() {
+                    None => result,
+                    Some(result_module) => {
+                        debug!("(resolving single import) found external module");
+                        // track the module as used.
+                        match result_module.def_id() {
+                            Some(DefId { krate: kid, .. }) => {
+                                self.used_crates.insert(kid);
+                            }
+                            _ => {}
+                        }
+                        let ns_def = NsDef::create_from_module(result_module, None);
+                        Success((Target::new(module.clone(), ns_def, Shadowable::Never), false))
+                    }
+                }
+            }
+            _ => result,
+        }
+    }
+
     fn report_unresolved_imports(&mut self, module_: Rc<Module>) {
         let index = module_.resolved_import_count.get();
         let imports = module_.imports.borrow();

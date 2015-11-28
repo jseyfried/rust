@@ -368,6 +368,37 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                   pub_err: &mut bool,
                   used_reexport: &mut bool)
                   -> ResolveResult<(Rc<Module>, NsDef)> {
+        let session = self.resolver.session;
+        let resolve_result = self.resolver.resolve_name_in_module_(
+            module,
+            name,
+            ns,
+            origin_module.def_id() == module.def_id(),
+            false,
+            || {
+                if *pub_err || !directive.is_public { return }
+                let msg = format!("`{}` is private, and cannot be reexported", name);
+                let note_msg = if let ValueNS = ns {
+                    span_err!(session, directive.span, E0364, "{}", &msg);
+                    format!("Consider marking `{}` as `pub` in the imported module", name)
+                } else {
+                    span_err!(session, directive.span, E0365, "{}", &msg);
+                    format!("Consider declaring module `{}` as a `pub mod`", name)
+                };
+                session.span_note(directive.span, &note_msg);
+                *pub_err = true;
+            }
+        );
+
+        return match resolve_result {
+            Success((target, used_reexport_)) => {
+                *used_reexport = used_reexport_;
+                Success((target.target_module, target.ns_def))
+            }
+            Indeterminate => Indeterminate,
+            Failed(m) => Failed(m),
+        };
+
         // Search for direct children of the containing module.
         build_reduced_graph::populate_module_if_necessary(self.resolver, module);
         if let Some(ns_def) = module.get_child(name, ns) {
