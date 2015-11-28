@@ -341,32 +341,25 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         };
 
         // We need to resolve both namespaces for this to succeed.
-        let (value_result, value_used_reexport) =
-            match self.resolver.resolve_name_in_module_(&target_module,
-                                                        source,
-                                                        ValueNS,
-                                                        module_.def_id() == target_module.def_id(),
-                                                        false,
-                                                        &mut error) {
-            Success((target, used_reexport)) =>
-                (Success((target.target_module, target.ns_def)), used_reexport),
-            Indeterminate => return Indeterminate,
-            Failed(m) => (Failed(m), false),
-        };
+        let value_result = self.resolver.resolve_name_in_module_(
+            &target_module,
+            source,
+            ValueNS,
+            module_.def_id() == target_module.def_id(),
+            false,
+            &mut error,
+        );
+        if let Indeterminate = value_result { return Indeterminate }
 
-        // We need to resolve both namespaces for this to succeed.
-        let (type_result, type_used_reexport) =
-            match self.resolver.resolve_name_in_module_(&target_module,
-                                                        source,
-                                                        TypeNS,
-                                                        module_.def_id() == target_module.def_id(),
-                                                        false,
-                                                        &mut error) {
-            Success((target, used_reexport)) =>
-                (Success((target.target_module, target.ns_def)), used_reexport),
-            Indeterminate => return Indeterminate,
-            Failed(m) => (Failed(m), false),
-        };
+        let type_result = self.resolver.resolve_name_in_module_(
+            &target_module,
+            source,
+            TypeNS,
+            module_.def_id() == target_module.def_id(),
+            false,
+            &mut error,
+        );
+        if let Indeterminate = type_result { return Indeterminate }
 
         if let (&Failed(_), &Failed(_)) = (&value_result, &type_result) {
             let msg = format!("There is no `{}` in `{}`",
@@ -376,8 +369,8 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         }
 
         // We've successfully resolved the import. Write the results in.
-        self.do_write(directive, module_, target, ValueNS, &value_result, value_used_reexport, lp);
-        self.do_write(directive, module_, target, TypeNS, &type_result, type_used_reexport, lp);
+        self.do_write(directive, module_, target, ValueNS, value_result, lp);
+        self.do_write(directive, module_, target, TypeNS, type_result, lp);
 
         debug!("(resolving single import) successfully resolved import");
 
@@ -391,28 +384,32 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         Success(())
     }
 
-    fn do_write(&mut self, directive: &ImportDirective, module: &Module, name: Name, ns: Namespace,
-                result: &ResolveResult<(Rc<Module>, NsDef)>, used_reexport: bool, lp: LastPrivate){
+    fn do_write(&mut self,
+                directive: &ImportDirective,
+                module: &Module,
+                name: Name,
+                ns: Namespace,
+                result: ResolveResult<(Target, bool)>,
+                lp: LastPrivate) {
         let mut import_resolutions = module.import_resolutions.borrow_mut();
         let import_resolution = import_resolutions.get_mut(&(name, ns)).unwrap();
 
-        let used_public = match *result {
-            Success((ref target_module, ref ns_def)) => {
+        let used_public = match result {
+            Success((mut target, used_reexport)) => {
                 debug!("(resolving single import) found {:?} target: {:?}",
                        ns.as_str(),
-                       ns_def.def());
+                       target.ns_def.def());
 
+                let used_public = target.ns_def.is_public();
                 self.check_for_conflicting_import(&import_resolution, directive.span, name, ns);
-                self.check_that_import_is_importable(ns_def, directive.span, name);
+                self.check_that_import_is_importable(&target.ns_def, directive.span, name);
 
-                let target = Target::new(target_module.clone(),
-                                         ns_def.clone(),
-                                         directive.shadowable);
+                target.shadowable = directive.shadowable;
                 import_resolution.target = Some(target);
                 import_resolution.id = directive.id;
                 import_resolution.is_public = directive.is_public;
 
-                ns_def.is_public()
+                used_reexport || used_public
             }
             Failed(_) => false,
             Indeterminate => {
@@ -424,8 +421,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                                            import_resolution,
                                                            directive.span,
                                                            (name, ns));
-
-        let used_public = used_reexport || used_public;
 
         assert!(import_resolution.outstanding_references >= 1);
         import_resolution.outstanding_references -= 1;
