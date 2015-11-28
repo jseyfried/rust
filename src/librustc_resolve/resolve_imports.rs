@@ -282,20 +282,20 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
     /// currently-unresolved imports, or success if we know the name exists.
     /// If successful, the resolved bindings are written into the module.
     fn resolve_import_for_module(&mut self,
-                                 module_: Rc<Module>,
+                                 module: Rc<Module>,
                                  import_directive: &ImportDirective)
                                  -> ResolveResult<()> {
         debug!("(resolving import for module) resolving import `{}::...` in `{}`",
                names_to_string(&import_directive.module_path[..]),
-               module_to_string(&*module_));
+               module_to_string(&*module));
 
         // Resolve the module path for the directive, if necessary.
         if import_directive.module_path.is_empty() {
             // Use the crate root.
             let root = self.resolver.graph_root.clone();
-            self.resolve_directive(&module_, root, import_directive, LastMod(AllPublic))
+            self.resolve_directive(import_directive, &module, root, LastMod(AllPublic))
         } else {
-            match self.resolver.resolve_module_path(module_.clone(),
+            match self.resolver.resolve_module_path(module.clone(),
                                                     &import_directive.module_path[..],
                                                     UseLexicalScopeFlag::DontUseLexicalScope,
                                                     import_directive.span,
@@ -306,21 +306,21 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                 // We found the module that the target is contained within.
                 // Attempt to resolve the import within it.
                 Success((containing_module, lp)) =>
-                    self.resolve_directive(&module_, containing_module, import_directive, lp)
+                    self.resolve_directive(import_directive, &module, containing_module, lp)
             }
         }
     }
 
     fn resolve_directive(&mut self,
-                         module_: &Module,
-                         target_module: Rc<Module>,
                          directive: &ImportDirective,
+                         directive_module: &Module,
+                         target_module: Rc<Module>,
                          lp: LastPrivate)
                          -> ResolveResult<()> {
-        let (target, source) = if let SingleImport(target, source) = directive.subclass {
-            (target, source)
-        } else {
-            return self.resolve_glob_import(&module_, target_module, directive, lp);
+        let (target, source) = match directive.subclass {
+            SingleImport(target, source) => (target, source),
+            GlobImport =>
+                return self.resolve_glob_import(&directive_module, target_module, directive, lp),
         };
 
         // pub_err makes sure we don't give the same error twice.
@@ -345,7 +345,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             &target_module,
             source,
             ValueNS,
-            module_.def_id() == target_module.def_id(),
+            directive_module.def_id() == target_module.def_id(),
             false,
             &mut error,
         );
@@ -355,7 +355,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             &target_module,
             source,
             TypeNS,
-            module_.def_id() == target_module.def_id(),
+            directive_module.def_id() == target_module.def_id(),
             false,
             &mut error,
         );
@@ -369,16 +369,14 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         }
 
         // We've successfully resolved the import. Write the results in.
-        self.do_write(directive, module_, target, ValueNS, value_result, lp);
-        self.do_write(directive, module_, target, TypeNS, type_result, lp);
-
-        debug!("(resolving single import) successfully resolved import");
+        self.do_write(directive, directive_module, target, ValueNS, value_result, lp);
+        self.do_write(directive, directive_module, target, TypeNS, type_result, lp);
 
         // Decrement the count of unresolved imports.
         assert!(self.resolver.unresolved_imports >= 1);
         self.resolver.unresolved_imports -= 1;
         if directive.is_public {
-            module_.dec_pub_count();
+            directive_module.dec_pub_count();
         }
 
         Success(())
@@ -396,10 +394,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
 
         let used_public = match result {
             Success((mut target, used_reexport)) => {
-                debug!("(resolving single import) found {:?} target: {:?}",
-                       ns.as_str(),
-                       target.ns_def.def());
-
                 let used_public = target.ns_def.is_public();
                 self.check_for_conflicting_import(&import_resolution, directive.span, name, ns);
                 self.check_that_import_is_importable(&target.ns_def, directive.span, name);
