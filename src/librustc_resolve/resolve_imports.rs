@@ -325,16 +325,48 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
 
         // pub_err makes sure we don't give the same error twice.
         let mut pub_err = false;
-        let (mut value_used_reexport, mut type_used_reexport) = (false, false);
+        let session = self.resolver.session;
+        let mut error = |ns| {
+            if pub_err || !directive.is_public { return }
+            let msg = format!("`{}` is private, and cannot be reexported", source);
+            let note_msg = if let ValueNS = ns {
+                span_err!(session, directive.span, E0364, "{}", &msg);
+                format!("Consider marking `{}` as `pub` in the imported module", source)
+            } else {
+                span_err!(session, directive.span, E0365, "{}", &msg);
+                format!("Consider declaring module `{}` as a `pub mod`", source)
+            };
+            session.span_note(directive.span, &note_msg);
+            pub_err = true;
+        };
 
         // We need to resolve both namespaces for this to succeed.
-        let value_result =
-            self.do_resolve(&target_module, source, ValueNS, module_, directive, &mut pub_err, &mut value_used_reexport);
-        if let Indeterminate = value_result { return Indeterminate }
+        let (value_result, value_used_reexport) =
+            match self.resolver.resolve_name_in_module_(&target_module,
+                                                        source,
+                                                        ValueNS,
+                                                        module_.def_id() == target_module.def_id(),
+                                                        false,
+                                                        &mut error) {
+            Success((target, used_reexport)) =>
+                (Success((target.target_module, target.ns_def)), used_reexport),
+            Indeterminate => return Indeterminate,
+            Failed(m) => (Failed(m), false),
+        };
 
-        let type_result =
-            self.do_resolve(&target_module, source, TypeNS, module_, directive, &mut pub_err, &mut type_used_reexport);
-        if let Indeterminate = type_result { return Indeterminate }
+        // We need to resolve both namespaces for this to succeed.
+        let (type_result, type_used_reexport) =
+            match self.resolver.resolve_name_in_module_(&target_module,
+                                                        source,
+                                                        TypeNS,
+                                                        module_.def_id() == target_module.def_id(),
+                                                        false,
+                                                        &mut error) {
+            Success((target, used_reexport)) =>
+                (Success((target.target_module, target.ns_def)), used_reexport),
+            Indeterminate => return Indeterminate,
+            Failed(m) => (Failed(m), false),
+        };
 
         if let (&Failed(_), &Failed(_)) = (&value_result, &type_result) {
             let msg = format!("There is no `{}` in `{}`",
@@ -357,140 +389,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         }
 
         Success(())
-    }
-
-    fn do_resolve(&mut self,
-                  module: &Rc<Module>,
-                  name: Name,
-                  ns: Namespace,
-                  origin_module: &Module,
-                  directive: &ImportDirective,
-                  pub_err: &mut bool,
-                  used_reexport: &mut bool)
-                  -> ResolveResult<(Rc<Module>, NsDef)> {
-        let session = self.resolver.session;
-        let resolve_result = self.resolver.resolve_name_in_module_(
-            module,
-            name,
-            ns,
-            origin_module.def_id() == module.def_id(),
-            false,
-            || {
-                if *pub_err || !directive.is_public { return }
-                let msg = format!("`{}` is private, and cannot be reexported", name);
-                let note_msg = if let ValueNS = ns {
-                    span_err!(session, directive.span, E0364, "{}", &msg);
-                    format!("Consider marking `{}` as `pub` in the imported module", name)
-                } else {
-                    span_err!(session, directive.span, E0365, "{}", &msg);
-                    format!("Consider declaring module `{}` as a `pub mod`", name)
-                };
-                session.span_note(directive.span, &note_msg);
-                *pub_err = true;
-            }
-        );
-
-        return match resolve_result {
-            Success((target, used_reexport_)) => {
-                *used_reexport = used_reexport_;
-                Success((target.target_module, target.ns_def))
-            }
-            Indeterminate => Indeterminate,
-            Failed(m) => Failed(m),
-        };
-
-        // Search for direct children of the containing module.
-        build_reduced_graph::populate_module_if_necessary(self.resolver, module);
-        if let Some(ns_def) = module.get_child(name, ns) {
-            debug!("(resolving single import) found {} binding", ns.as_str());
-            if !*pub_err && directive.is_public && !ns_def.is_public() {
-                let msg = format!("`{}` is private, and cannot be reexported", name);
-                let note_msg = if let ValueNS = ns {
-                    span_err!(self.resolver.session, directive.span, E0364, "{}", &msg);
-                    format!("Consider marking `{}` as `pub` in the imported module", name)
-                } else {
-                    span_err!(self.resolver.session, directive.span, E0365, "{}", &msg);
-                    format!("Consider declaring module `{}` as a `pub mod`", name)
-                };
-                self.resolver.session.span_note(directive.span, &note_msg);
-                *pub_err = true;
-            }
-
-            return Success((module.clone(), ns_def.clone()));
-        }
-
-        // If there is an unresolved glob at this point in the
-        // containing module, bail out. We don't know enough to be
-        // able to resolve this import.
-        if module.pub_glob_count.get() > 0 {
-            debug!("(resolving single import) unresolved pub glob; bailing out");
-            return Indeterminate;
-        }
-
-        // Now search the exported imports within the containing module.
-        let result = match module.import_resolutions.borrow().get(&(name, ns)) {
-            // Import resolutions must be declared with "pub" in order to be exported.
-            Some(import_resolution) if !import_resolution.is_public => Failed(None),
-
-            // The name is an import which has been fully resolved.
-            // We can, therefore, just follow it.
-            Some(import_resolution) if import_resolution.outstanding_references == 0 => {
-                *used_reexport = true;
-                match import_resolution.target.clone() {
-                    None => Failed(None),
-                    Some(Target { target_module, ns_def, shadowable: _ }) => {
-                        debug!("(resolving single import) found import in ns {:?}", ns);
-                        let id = import_resolution.id;
-                        // track used imports and extern crates as well
-                        self.resolver.used_imports.insert((id, ns));
-                        self.resolver.record_import_use(id, name);
-                        if let Some(DefId { krate, .. }) = target_module.def_id() {
-                            self.resolver.used_crates.insert(krate);
-                        }
-                        Success((target_module, ns_def))
-                    }
-                }
-            },
-
-            // If module is the same as the original module whose import we are resolving and
-            // there it has an unresolved import with the same name as `source`, then the user
-            // is actually trying to import an item that is declared in the same scope.
-            //
-            // e.g
-            // use self::submodule;
-            // pub mod submodule;
-            //
-            // In this case we continue as if we resolved the import and let
-            // check_for_conflicts_between_imports_and_items handle the conflict.
-            Some(_) if origin_module.def_id() != module.def_id() => return Indeterminate,
-
-            // The containing module definitely doesn't have an exported import with the name
-            // in question. We can therecore accurately report that the names are unbound.
-            _ => Failed(None),
-        };
-
-        // If we didn't find a result in the type namespace, search the
-        // external modules.
-        match result {
-            Failed(_) if ns == TypeNS => {
-                match module.external_module_children.borrow_mut().get(&name).cloned() {
-                    None => result,
-                    Some(result_module) => {
-                        debug!("(resolving single import) found external module");
-                        // track the module as used.
-                        match result_module.def_id() {
-                            Some(DefId { krate: kid, .. }) => {
-                                self.resolver.used_crates.insert(kid);
-                            }
-                            _ => {}
-                        }
-                        let ns_def = NsDef::create_from_module(result_module, None);
-                        Success((module.clone(), ns_def))
-                    }
-                }
-            }
-            _ => result,
-        }
     }
 
     fn do_write(&mut self, directive: &ImportDirective, module: &Module, name: Name, ns: Namespace,

@@ -1565,12 +1565,12 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                                   allow_private_imports: bool,
                                   error: F)
                                   -> ResolveResult<(Target, bool)>
-        where F: FnOnce()
+        where F: FnOnce(Namespace)
     {
         // Search for direct children of the containing module.
         build_reduced_graph::populate_module_if_necessary(self, module);
         if let Some(ns_def) = module.get_child(name, ns) {
-            if !ns_def.is_public() { error() }
+            if !ns_def.is_public() { error(ns) }
             return Success((Target::new(module.clone(), ns_def, Shadowable::Never), false));
         }
 
