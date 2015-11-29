@@ -1182,7 +1182,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         // modules as we go.
         while index < module_path_len {
             let name = module_path[index];
-            match self.resolve_name_in_module(search_module.clone(),
+            match self.resolve_name_in_module(&search_module,
                                               name,
                                               TypeNS,
                                               name_search_type,
@@ -1366,7 +1366,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         let mut search_module = module_;
         loop {
             // Resolve the name in the parent module.
-            match self.resolve_name_in_module(search_module.clone(),
+            match self.resolve_name_in_module(&search_module,
                                               name,
                                               namespace,
                                               PathSearch,
@@ -1485,85 +1485,12 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
     /// The boolean returned on success is an indicator of whether this lookup
     /// passed through a public re-export proxy.
     fn resolve_name_in_module(&mut self,
-                              module_: Rc<Module>,
+                              module: &Rc<Module>,
                               name: Name,
-                              namespace: Namespace,
+                              ns: Namespace,
                               name_search_type: NameSearchType,
                               allow_private_imports: bool)
                               -> ResolveResult<(Target, bool)> {
-        debug!("(resolving name in module) resolving `{}` in `{}`",
-               name,
-               module_to_string(&*module_));
-
-        // First, check the direct children of the module.
-        build_reduced_graph::populate_module_if_necessary(self, &module_);
-
-        if let Some(ns_def) = module_.get_child(name, namespace) {
-            debug!("(resolving name in module) found node as child");
-            return Success((Target::new(module_.clone(), ns_def, Shadowable::Never), false));
-        }
-
-        // Next, check the module's imports if necessary.
-
-        // If this is a search of all imports, we should be done with glob
-        // resolution at this point.
-        if let PathSearch = name_search_type {
-            assert_eq!(module_.glob_count.get(), 0);
-        }
-
-        // Check the list of resolved imports.
-        match module_.import_resolutions.borrow().get(&(name, namespace)) {
-            Some(import_resolution) if allow_private_imports ||
-                                       import_resolution.is_public => {
-
-                if import_resolution.is_public &&
-                   import_resolution.outstanding_references != 0 {
-                    debug!("(resolving name in module) import unresolved; bailing out");
-                    return Indeterminate;
-                }
-                match import_resolution.target.clone() {
-                    None => {
-                        debug!("(resolving name in module) name found, but not in namespace {:?}",
-                               namespace);
-                    }
-                    Some(target) => {
-                        debug!("(resolving name in module) resolved to import");
-                        // track used imports and extern crates as well
-                        let id = import_resolution.id;
-                        self.used_imports.insert((id, namespace));
-                        self.record_import_use(id, name);
-                        if let Some(DefId{krate: kid, ..}) = target.target_module.def_id() {
-                            self.used_crates.insert(kid);
-                        }
-                        return Success((target, true));
-                    }
-                }
-            }
-            Some(..) | None => {} // Continue.
-        }
-
-        // Finally, search through external children.
-        if namespace == TypeNS {
-            // FIXME (21114): In principle unclear `child` *has* to be lifted.
-            let child = module_.external_module_children.borrow().get(&name).cloned();
-            if let Some(module) = child {
-                let ns_def = NsDef::create_from_module(module, None);
-                return Success((Target::new(module_, ns_def, Shadowable::Never), false));
-            }
-        }
-
-        // We're out of luck.
-        debug!("(resolving name in module) failed to resolve `{}`", name);
-        return Failed(None);
-    }
-
-    fn resolve_name_in_module_(&mut self,
-                               module: &Rc<Module>,
-                               name: Name,
-                               ns: Namespace,
-                               name_search_type: NameSearchType,
-                               allow_private_imports: bool)
-                               -> ResolveResult<(Target, bool)> {
         // Search for direct children of the containing module.
         build_reduced_graph::populate_module_if_necessary(self, module);
 
@@ -2968,7 +2895,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         }
 
         let name = segments.last().unwrap().identifier.name;
-        let def = match self.resolve_name_in_module(containing_module.clone(),
+        let def = match self.resolve_name_in_module(&containing_module,
                                                     name,
                                                     namespace,
                                                     NameSearchType::PathSearch,
@@ -3034,7 +2961,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         }
 
         let name = segments.last().unwrap().identifier.name;
-        match self.resolve_name_in_module(containing_module,
+        match self.resolve_name_in_module(&containing_module,
                                           name,
                                           namespace,
                                           NameSearchType::PathSearch,

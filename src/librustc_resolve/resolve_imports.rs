@@ -14,7 +14,7 @@ use DefModifiers;
 use Module;
 use Namespace::{self, TypeNS, ValueNS};
 use NsDef;
-use NameSearchType::{self, ImportSearch};
+use NameSearchType::ImportSearch;
 use ResolveResult;
 use ResolveResult::*;
 use Resolver;
@@ -25,7 +25,6 @@ use {resolve_error, ResolutionError};
 use build_reduced_graph;
 
 use rustc::middle::def::*;
-use rustc::middle::def_id::DefId;
 use rustc::middle::privacy::*;
 
 use syntax::ast::{NodeId, Name};
@@ -327,18 +326,18 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         };
 
         // pub_err makes sure we don't give the same error twice.
-        let mut pub_err = Cell::new(false);
+        let pub_err = Cell::new(false);
         let search = ImportSearch {
             directive: directive, module: directive_module, pub_err: &pub_err
         };
         
         // We need to resolve both namespaces for this to succeed.
         let value_result =
-            self.resolver.resolve_name_in_module_(&target_module, source, ValueNS, search, false);
+            self.resolver.resolve_name_in_module(&target_module, source, ValueNS, search, false);
         if let Indeterminate = value_result { return Indeterminate }
 
         let type_result =
-            self.resolver.resolve_name_in_module_(&target_module, source, TypeNS, search, false);
+            self.resolver.resolve_name_in_module(&target_module, source, TypeNS, search, false);
         if let Indeterminate = type_result { return Indeterminate }
 
         if let (&Failed(_), &Failed(_)) = (&value_result, &type_result) {
