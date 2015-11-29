@@ -14,7 +14,7 @@ use DefModifiers;
 use Module;
 use Namespace::{self, TypeNS, ValueNS};
 use NsDef;
-use NameSearchType;
+use NameSearchType::{self, ImportSearch};
 use ResolveResult;
 use ResolveResult::*;
 use Resolver;
@@ -34,7 +34,7 @@ use syntax::codemap::Span;
 
 use std::mem::replace;
 use std::rc::Rc;
-
+use std::cell::Cell;
 
 /// Contains data for specific types of import directives.
 #[derive(Copy, Clone,Debug)]
@@ -295,11 +295,13 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             let root = self.resolver.graph_root.clone();
             self.resolve_directive(import_directive, &module, root, LastMod(AllPublic))
         } else {
+            let err = Cell::new(true);
+            let search = ImportSearch { directive: import_directive, module: &module, err: &err };
             match self.resolver.resolve_module_path(module.clone(),
                                                     &import_directive.module_path[..],
                                                     UseLexicalScopeFlag::DontUseLexicalScope,
                                                     import_directive.span,
-                                                    NameSearchType::ImportSearch) {
+                                                    search) {
                 Failed(err) => Failed(err),
                 Indeterminate => Indeterminate,
 

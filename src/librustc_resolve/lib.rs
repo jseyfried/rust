@@ -675,10 +675,10 @@ enum AssocItemResolveResult {
     ResolveAttempt(Option<PathResolution>),
 }
 
-#[derive(Copy, Clone, PartialEq)]
-enum NameSearchType {
+#[derive(Copy, Clone)]
+enum NameSearchType<'a> {
     /// We're doing a name search in order to resolve a `use` directive.
-    ImportSearch,
+    ImportSearch { directive: &'a ImportDirective, module: &'a Rc<Module>, err: &'a Cell<bool> },
 
     /// We're doing a name search in order to resolve a path type, a path
     /// expression, or a path pattern.
@@ -1507,7 +1507,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
         // If this is a search of all imports, we should be done with glob
         // resolution at this point.
-        if name_search_type == PathSearch {
+        if let PathSearch = name_search_type {
             assert_eq!(module_.glob_count.get(), 0);
         }
 
