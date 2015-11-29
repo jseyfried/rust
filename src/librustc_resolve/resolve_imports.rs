@@ -330,7 +330,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         let search = ImportSearch {
             directive: directive, module: directive_module, pub_err: &pub_err
         };
-        
+
         // We need to resolve both namespaces for this to succeed.
         let value_result =
             self.resolver.resolve_name_in_module(&target_module, source, ValueNS, search, false);
