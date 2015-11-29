@@ -508,6 +508,8 @@ impl Namespace {
     }
 }
 
+pub type NsName = (Name, Namespace);
+
 impl<'a, 'v, 'tcx> Visitor<'v> for Resolver<'a, 'tcx> {
     fn visit_nested_item(&mut self, item: hir::ItemId) {
         self.visit_item(self.ast_map.expect_item(item.id))
@@ -736,7 +738,7 @@ pub struct Module {
     def: Cell<Option<Def>>,
     is_public: bool,
 
-    children: RefCell<HashMap<(Name, Namespace), NsDef>>,
+    children: RefCell<HashMap<NsName, NsDef>>,
     imports: RefCell<Vec<ImportDirective>>,
 
     // The external module children of this node that were declared with
@@ -760,7 +762,7 @@ pub struct Module {
     anonymous_children: RefCell<NodeMap<Rc<Module>>>,
 
     // The status of resolving each import in this module.
-    import_resolutions: RefCell<HashMap<(Name, Namespace), ImportResolution>>,
+    import_resolutions: RefCell<HashMap<NsName, ImportResolution>>,
 
     // The number of unresolved globs that this module exports.
     glob_count: Cell<usize>,
@@ -803,12 +805,12 @@ impl Module {
         })
     }
 
-    fn get_child(&self, name: Name, ns: Namespace) -> Option<NsDef> {
-        self.children.borrow().get(&(name, ns)).cloned()
+    fn get_child(&self, ns_name: NsName) -> Option<NsDef> {
+        self.children.borrow().get(&ns_name).cloned()
     }
 
-    fn try_define_child(&self, name: Name, ns: Namespace, ns_def: NsDef) -> bool {
-        match self.children.borrow_mut().entry((name, ns)) {
+    fn try_define_child(&self, ns_name: NsName, ns_def: NsDef) -> bool {
+        match self.children.borrow_mut().entry(ns_name) {
             hash_map::Entry::Vacant(entry) => { entry.insert(ns_def); true }
             hash_map::Entry::Occupied(_) => false,
         }
@@ -1182,8 +1184,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         while index < module_path_len {
             let name = module_path[index];
             match self.resolve_name_in_module(&search_module,
-                                              name,
-                                              TypeNS,
+                                              (name, TypeNS),
                                               name_search_type,
                                               false) {
                 Failed(None) => {
@@ -1315,7 +1316,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                     // This is not a crate-relative path. We resolve the
                     // first component of the path in the current lexical
                     // scope and then proceed to resolve below that.
-                    match self.resolve_item_in_lexical_scope(module_, module_path[0], TypeNS) {
+                    match self.resolve_item_in_lexical_scope(module_, (module_path[0], TypeNS)) {
                         Failed(err) => return Failed(err),
                         Indeterminate => {
                             debug!("(resolving module path for import) indeterminate; bailing");
@@ -1351,25 +1352,18 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
     /// Invariant: This must only be called during main resolution, not during
     /// import resolution.
-    fn resolve_item_in_lexical_scope(&mut self,
-                                     module_: Rc<Module>,
-                                     name: Name,
-                                     namespace: Namespace)
+    fn resolve_item_in_lexical_scope(&mut self, module_: Rc<Module>, ns_name: NsName)
                                      -> ResolveResult<(Target, bool)> {
         debug!("(resolving item in lexical scope) resolving `{}` in namespace {:?} in `{}`",
-               name,
-               namespace,
+               ns_name.0,
+               ns_name.1,
                module_to_string(&*module_));
 
         // Proceed up the scope chain looking for parent modules.
         let mut search_module = module_;
         loop {
             // Resolve the name in the parent module.
-            match self.resolve_name_in_module(&search_module,
-                                              name,
-                                              namespace,
-                                              PathSearch,
-                                              true) {
+            match self.resolve_name_in_module(&search_module, ns_name, PathSearch, true) {
                 Failed(Some((span, msg))) => {
                     resolve_error(self, span, ResolutionError::FailedToResolve(&*msg));
                 }
@@ -1485,15 +1479,14 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
     /// passed through a public re-export proxy.
     fn resolve_name_in_module(&mut self,
                               module: &Rc<Module>,
-                              name: Name,
-                              ns: Namespace,
+                              (name, ns): NsName,
                               name_search_type: NameSearchType,
                               allow_private_imports: bool)
                               -> ResolveResult<(Target, bool)> {
         // Search for direct children of the containing module.
         build_reduced_graph::populate_module_if_necessary(self, module);
 
-        if let Some(ns_def) = module.get_child(name, ns) {
+        if let Some(ns_def) = module.get_child((name, ns)) {
             if let ImportSearch { directive, pub_err, .. } = name_search_type {
                 if !pub_err.get() && directive.is_public && !ns_def.is_public() {
                     let msg = format!("`{}` is private, and cannot be reexported", name);
@@ -1636,7 +1629,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             Some(name) => {
                 build_reduced_graph::populate_module_if_necessary(self, &orig_module);
 
-                match orig_module.get_child(name, TypeNS) {
+                match orig_module.get_child((name, TypeNS)) {
                     None => {
                         debug!("!!! (with scope) didn't find `{}` in `{}`",
                                name,
@@ -2594,7 +2587,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                                        span: Span)
                                        -> BareIdentifierPatternResolution {
         let module = self.current_module.clone();
-        match self.resolve_item_in_lexical_scope(module, name, ValueNS) {
+        match self.resolve_item_in_lexical_scope(module, (name, ValueNS)) {
             Success((target, _)) => {
                 debug!("(resolve bare identifier pattern) succeeded in finding {} at {:?}",
                        name,
@@ -2749,7 +2742,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             }
         }
 
-        self.resolve_item_by_name_in_lexical_scope(identifier.name, namespace)
+        self.resolve_item_by_name_in_lexical_scope((identifier.name, namespace))
             .map(LocalDef::from_def)
     }
 
@@ -2884,8 +2877,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
         let name = segments.last().unwrap().identifier.name;
         let def = match self.resolve_name_in_module(&containing_module,
-                                                    name,
-                                                    namespace,
+                                                    (name, namespace),
                                                     NameSearchType::PathSearch,
                                                     false) {
             Success((Target { ns_def, .. }, _)) => {
@@ -2950,8 +2942,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
         let name = segments.last().unwrap().identifier.name;
         match self.resolve_name_in_module(&containing_module,
-                                          name,
-                                          namespace,
+                                          (name, namespace),
                                           NameSearchType::PathSearch,
                                           false) {
             Success((Target { ns_def, .. }, _)) => {
@@ -2998,13 +2989,10 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         None
     }
 
-    fn resolve_item_by_name_in_lexical_scope(&mut self,
-                                             name: Name,
-                                             namespace: Namespace)
-                                             -> Option<Def> {
+    fn resolve_item_by_name_in_lexical_scope(&mut self, ns_name: NsName) -> Option<Def> {
         // Check the items.
         let module = self.current_module.clone();
-        match self.resolve_item_in_lexical_scope(module, name, namespace) {
+        match self.resolve_item_in_lexical_scope(module, ns_name) {
             Success((target, _)) => {
                 match target.ns_def.def() {
                     None => {
@@ -3012,12 +3000,12 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                         // found a module instead. Modules don't have defs.
                         debug!("(resolving item path by identifier in lexical scope) failed to \
                                 resolve {} after success...",
-                               name);
+                               ns_name.0);
                         None
                     }
                     Some(def) => {
                         debug!("(resolving item path in lexical scope) resolved `{}` to item",
-                               name);
+                               ns_name.0);
                         // This lookup is "all public" because it only searched
                         // for one identifier in the current module (couldn't
                         // have passed through reexports or anything like that.
@@ -3030,7 +3018,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             }
             Failed(err) => {
                 debug!("(resolving item path by identifier in lexical scope) failed to resolve {}",
-                       name);
+                       ns_name.0);
 
                 if let Some((span, msg)) = err {
                     resolve_error(self, span, ResolutionError::FailedToResolve(&*msg))
@@ -3075,7 +3063,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             if name_path.len() == 1 {
                 match this.primitive_type_table.primitive_types.get(last_name) {
                     Some(_) => None,
-                    None => this.current_module.get_child(*last_name, TypeNS)
+                    None => this.current_module.get_child((*last_name, TypeNS))
                                                .as_ref()
                                                .and_then(NsDef::module)
                 }
@@ -3139,7 +3127,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
         // Look for a method in the current self type's impl module.
         if let Some(module) = get_module(self, path.span, &name_path) {
-            if let Some(ns_def) = module.get_child(name, ValueNS) {
+            if let Some(ns_def) = module.get_child((name, ValueNS)) {
                 if let Some(DefMethod(did)) = ns_def.def() {
                     if is_static_method(self, did) {
                         return StaticMethod(path_names_to_string(&path, 0));
@@ -3550,7 +3538,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         debug!("Children:");
         build_reduced_graph::populate_module_if_necessary(self, &module_);
         for (&(name, ns), _) in module_.children.borrow().iter() {
-            if ns == TypeNS || module_.get_child(name, TypeNS).is_none() {
+            if ns == TypeNS || module_.get_child((name, TypeNS)).is_none() {
                 debug!("* {}", name);
             }
         }

@@ -18,7 +18,8 @@ use resolve_imports::ImportDirective;
 use resolve_imports::ImportDirectiveSubclass::{self, SingleImport, GlobImport};
 use resolve_imports::ImportResolution;
 use Module;
-use Namespace::{self, TypeNS, ValueNS};
+use Namespace::{TypeNS, ValueNS};
+use NsName;
 use NsDef;
 use {names_to_string, module_to_string};
 use ParentLink::{self, ModuleParentLink, BlockParentLink};
@@ -103,16 +104,16 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
         intravisit::walk_crate(&mut visitor, krate);
     }
 
-    fn try_define<T: ToNsDef>(&self, parent: &Rc<Module>, name: Name, ns: Namespace, ns_def: T) {
-        parent.try_define_child(name, ns, ns_def.to_ns_def());
+    fn try_define<T: ToNsDef>(&self, parent: &Rc<Module>, ns_name: NsName, ns_def: T) {
+        parent.try_define_child(ns_name, ns_def.to_ns_def());
     }
 
-    fn define<T: ToNsDef>(&self, parent: &Rc<Module>, name: Name, ns: Namespace, ns_def: T) {
+    fn define<T: ToNsDef>(&self, parent: &Rc<Module>, (name, ns): NsName, ns_def: T) {
         let ns_def = ns_def.to_ns_def();
         let sp = ns_def.span.unwrap_or(DUMMY_SP);
         self.check_for_conflicts_between_external_crates_and_items(&**parent, name, sp);
 
-        if !parent.try_define_child(name, ns, ns_def) {
+        if !parent.try_define_child((name, ns), ns_def) {
             // Record an error here by looking up the namespace that had the duplicate
             let ns_str = match ns { TypeNS => "type or module", ValueNS => "value" };
             resolve_error(self, sp, ResolutionError::DuplicateDefinition(ns_str, name));
@@ -310,7 +311,7 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                 let parent_link = self.get_parent_link(parent, name);
                 let def = DefMod(self.ast_map.local_def_id(item.id));
                 let module = Module::new(parent_link, Some(def), false, is_public);
-                self.define(parent, name, TypeNS, (module.clone(), sp));
+                self.define(parent, (name, TypeNS), (module.clone(), sp));
                 module
             }
 
@@ -320,17 +321,17 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
             ItemStatic(_, m, _) => {
                 let mutbl = m == hir::MutMutable;
                 let def = DefStatic(self.ast_map.local_def_id(item.id), mutbl);
-                self.define(parent, name, ValueNS, (def, sp, modifiers));
+                self.define(parent, (name, ValueNS), (def, sp, modifiers));
                 parent.clone()
             }
             ItemConst(_, _) => {
                 let def = DefConst(self.ast_map.local_def_id(item.id));
-                self.define(parent, name, ValueNS, (def, sp, modifiers));
+                self.define(parent, (name, ValueNS), (def, sp, modifiers));
                 parent.clone()
             }
             ItemFn(_, _, _, _, _, _) => {
                 let def = DefFn(self.ast_map.local_def_id(item.id), false);
-                self.define(parent, name, ValueNS, (def, sp, modifiers));
+                self.define(parent, (name, ValueNS), (def, sp, modifiers));
                 parent.clone()
             }
 
@@ -339,7 +340,7 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                 let parent_link = self.get_parent_link(parent, name);
                 let def = DefTy(self.ast_map.local_def_id(item.id), false);
                 let module = Module::new(parent_link, Some(def), false, is_public);
-                self.define(parent, name, TypeNS, (module, sp));
+                self.define(parent, (name, TypeNS), (module, sp));
                 parent.clone()
             }
 
@@ -347,7 +348,7 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                 let parent_link = self.get_parent_link(parent, name);
                 let def = DefTy(self.ast_map.local_def_id(item.id), true);
                 let module = Module::new(parent_link, Some(def), false, is_public);
-                self.define(parent, name, TypeNS, (module.clone(), sp));
+                self.define(parent, (name, TypeNS), (module.clone(), sp));
 
                 for variant in &(*enum_definition).variants {
                     let item_def_id = self.ast_map.local_def_id(item.id);
@@ -367,13 +368,13 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
 
                 // Define a name in the type namespace.
                 let def = DefTy(self.ast_map.local_def_id(item.id), false);
-                self.define(parent, name, TypeNS, (def, sp, modifiers));
+                self.define(parent, (name, TypeNS), (def, sp, modifiers));
 
                 // If this is a newtype or unit-like struct, define a name
                 // in the value namespace as well
                 if let Some(cid) = ctor_id {
                     let def = DefStruct(self.ast_map.local_def_id(cid));
-                    self.define(parent, name, ValueNS, (def, sp, modifiers));
+                    self.define(parent, (name, ValueNS), (def, sp, modifiers));
                 }
 
                 // Record the def ID and fields of this struct.
@@ -402,7 +403,7 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                 let parent_link = self.get_parent_link(parent, name);
                 let def = DefTrait(def_id);
                 let module = Module::new(parent_link, Some(def), false, is_public);
-                self.define(parent, name, TypeNS, (module.clone(), sp));
+                self.define(parent, (name, TypeNS), (module.clone(), sp));
 
                 // Add the names of all the items to the trait info.
                 for item in items {
@@ -414,7 +415,7 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                     };
 
                     let modifiers = DefModifiers::PUBLIC; // NB: not DefModifiers::IMPORTABLE
-                    self.define(&module, item.name, ns, (def, item.span, modifiers));
+                    self.define(&module, (item.name, ns), (def, item.span, modifiers));
 
                     self.trait_item_map.insert((item.name, def_id), item_def_id);
                 }
@@ -446,8 +447,8 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
         // variants are always treated as importable to allow them to be glob used
         let modifiers = DefModifiers::PUBLIC | DefModifiers::IMPORTABLE;
 
-        self.define(parent, name, ValueNS, (def, variant.span, modifiers));
-        self.define(parent, name, TypeNS, (def, variant.span, modifiers));
+        self.define(parent, (name, ValueNS), (def, variant.span, modifiers));
+        self.define(parent, (name, TypeNS), (def, variant.span, modifiers));
     }
 
     /// Constructs the reduced graph for one foreign item.
@@ -470,7 +471,7 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                 DefStatic(self.ast_map.local_def_id(foreign_item.id), m)
             }
         };
-        self.define(parent, name, ValueNS, (def, foreign_item.span, modifiers));
+        self.define(parent, (name, ValueNS), (def, foreign_item.span, modifiers));
     }
 
     fn build_reduced_graph_for_block(&mut self, block: &Block, parent: &Rc<Module>) -> Rc<Module> {
@@ -524,7 +525,7 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                        is_public);
                 let parent_link = self.get_parent_link(new_parent, name);
                 let module = Module::new(parent_link, Some(def), true, is_public);
-                self.try_define(new_parent, name, TypeNS, (module, DUMMY_SP));
+                self.try_define(new_parent, (name, TypeNS), (module, DUMMY_SP));
             }
             _ => {}
         }
@@ -538,18 +539,18 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                 // glob used
                 let modifiers = DefModifiers::PUBLIC | DefModifiers::IMPORTABLE;
                 if is_struct {
-                    self.try_define(new_parent, name, TypeNS, (def, DUMMY_SP, modifiers));
+                    self.try_define(new_parent, (name, TypeNS), (def, DUMMY_SP, modifiers));
                     // Not adding fields for variants as they are not accessed with a self receiver
                     self.structs.insert(variant_id, Vec::new());
                 } else {
-                    self.try_define(new_parent, name, ValueNS, (def, DUMMY_SP, modifiers));
+                    self.try_define(new_parent, (name, ValueNS), (def, DUMMY_SP, modifiers));
                 }
             }
             DefFn(ctor_id, true) => {
                 let def =
                     csearch::get_tuple_struct_definition_if_ctor(&self.session.cstore, ctor_id)
                         .map_or(def, |_| DefStruct(ctor_id));
-                self.try_define(new_parent, name, ValueNS, (def, DUMMY_SP, modifiers));
+                self.try_define(new_parent, (name, ValueNS), (def, DUMMY_SP, modifiers));
             }
             DefFn(..) |
             DefStatic(..) |
@@ -569,7 +570,7 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                 if !new_parent.is_normal() {
                     modifiers = modifiers & !DefModifiers::IMPORTABLE;
                 }
-                self.try_define(new_parent, name, ValueNS, (def, DUMMY_SP, modifiers));
+                self.try_define(new_parent, (name, ValueNS), (def, DUMMY_SP, modifiers));
             }
             DefTrait(def_id) => {
                 debug!("(building reduced graph for external crate) building type {}",
@@ -598,7 +599,7 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                 // Define a module if necessary.
                 let parent_link = self.get_parent_link(new_parent, name);
                 let module = Module::new(parent_link, Some(def), true, is_public);
-                self.try_define(new_parent, name, TypeNS, (module, DUMMY_SP));
+                self.try_define(new_parent, (name, TypeNS), (module, DUMMY_SP));
             }
             DefAssociatedTy(..) => {
                 debug!("(building reduced graph for external crate) building type {}",
@@ -609,7 +610,7 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                     _ => modifiers & !DefModifiers::IMPORTABLE,
                 };
 
-                self.try_define(new_parent, name, TypeNS, (def, DUMMY_SP, modifiers));
+                self.try_define(new_parent, (name, TypeNS), (def, DUMMY_SP, modifiers));
             }
             DefStruct(def_id) => {
                 debug!("(building reduced graph for external crate) building type and value for \
@@ -618,7 +619,7 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                 let fields = csearch::get_struct_field_names(&self.session.cstore, def_id);
 
                 if fields.is_empty() {
-                    self.try_define(new_parent, name, ValueNS, (def, DUMMY_SP, modifiers));
+                    self.try_define(new_parent, (name, ValueNS), (def, DUMMY_SP, modifiers));
                 }
 
                 // Record the def ID and fields of this struct.

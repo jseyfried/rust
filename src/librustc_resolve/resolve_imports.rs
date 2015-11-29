@@ -333,11 +333,11 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
 
         // We need to resolve both namespaces for this to succeed.
         let value_result =
-            self.resolver.resolve_name_in_module(&target_module, source, ValueNS, search, false);
+            self.resolver.resolve_name_in_module(&target_module, (source, ValueNS), search, false);
         if let Indeterminate = value_result { return Indeterminate }
 
         let type_result =
-            self.resolver.resolve_name_in_module(&target_module, source, TypeNS, search, false);
+            self.resolver.resolve_name_in_module(&target_module, (source, TypeNS), search, false);
         if let Indeterminate = type_result { return Indeterminate }
 
         if let (&Failed(_), &Failed(_)) = (&value_result, &type_result) {
@@ -667,7 +667,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         }
 
         // Check for item conflicts.
-        let ns_def = match module.get_child(name, ns) {
+        let ns_def = match module.get_child((name, ns)) {
             None => {
                 // There can't be any conflicts.
                 return;
