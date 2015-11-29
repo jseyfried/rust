@@ -295,8 +295,9 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             let root = self.resolver.graph_root.clone();
             self.resolve_directive(import_directive, &module, root, LastMod(AllPublic))
         } else {
-            let err = Cell::new(true);
-            let search = ImportSearch { directive: import_directive, module: &module, err: &err };
+            let pub_err = Cell::new(true);
+            let search =
+                ImportSearch { directive: import_directive, module: &module, pub_err: &pub_err };
             match self.resolver.resolve_module_path(module.clone(),
                                                     &import_directive.module_path[..],
                                                     UseLexicalScopeFlag::DontUseLexicalScope,
@@ -326,41 +327,18 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         };
 
         // pub_err makes sure we don't give the same error twice.
-        let mut pub_err = false;
-        let session = self.resolver.session;
-        let mut error = |ns| {
-            if pub_err || !directive.is_public { return }
-            let msg = format!("`{}` is private, and cannot be reexported", source);
-            let note_msg = if let ValueNS = ns {
-                span_err!(session, directive.span, E0364, "{}", &msg);
-                format!("Consider marking `{}` as `pub` in the imported module", source)
-            } else {
-                span_err!(session, directive.span, E0365, "{}", &msg);
-                format!("Consider declaring module `{}` as a `pub mod`", source)
-            };
-            session.span_note(directive.span, &note_msg);
-            pub_err = true;
+        let mut pub_err = Cell::new(false);
+        let search = ImportSearch {
+            directive: directive, module: directive_module, pub_err: &pub_err
         };
-
+        
         // We need to resolve both namespaces for this to succeed.
-        let value_result = self.resolver.resolve_name_in_module_(
-            &target_module,
-            source,
-            ValueNS,
-            directive_module.def_id() == target_module.def_id(),
-            false,
-            &mut error,
-        );
+        let value_result =
+            self.resolver.resolve_name_in_module_(&target_module, source, ValueNS, search, false);
         if let Indeterminate = value_result { return Indeterminate }
 
-        let type_result = self.resolver.resolve_name_in_module_(
-            &target_module,
-            source,
-            TypeNS,
-            directive_module.def_id() == target_module.def_id(),
-            false,
-            &mut error,
-        );
+        let type_result =
+            self.resolver.resolve_name_in_module_(&target_module, source, TypeNS, search, false);
         if let Indeterminate = type_result { return Indeterminate }
 
         if let (&Failed(_), &Failed(_)) = (&value_result, &type_result) {

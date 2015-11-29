@@ -678,7 +678,7 @@ enum AssocItemResolveResult {
 #[derive(Copy, Clone)]
 enum NameSearchType<'a> {
     /// We're doing a name search in order to resolve a `use` directive.
-    ImportSearch { directive: &'a ImportDirective, module: &'a Rc<Module>, err: &'a Cell<bool> },
+    ImportSearch { directive: &'a ImportDirective, module: &'a Module, pub_err: &'a Cell<bool> },
 
     /// We're doing a name search in order to resolve a path type, a path
     /// expression, or a path pattern.
@@ -1557,20 +1557,32 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         return Failed(None);
     }
 
-    fn resolve_name_in_module_<F>(&mut self,
-                                  module: &Rc<Module>,
-                                  name: Name,
-                                  ns: Namespace,
-                                  fail_on_indeterminate_import: bool,
-                                  allow_private_imports: bool,
-                                  error: F)
-                                  -> ResolveResult<(Target, bool)>
-        where F: FnOnce(Namespace)
-    {
+    fn resolve_name_in_module_(&mut self,
+                               module: &Rc<Module>,
+                               name: Name,
+                               ns: Namespace,
+                               name_search_type: NameSearchType,
+                               allow_private_imports: bool)
+                               -> ResolveResult<(Target, bool)> {
         // Search for direct children of the containing module.
         build_reduced_graph::populate_module_if_necessary(self, module);
+
         if let Some(ns_def) = module.get_child(name, ns) {
-            if !ns_def.is_public() { error(ns) }
+            if let ImportSearch { directive, pub_err, .. } = name_search_type {
+                if !pub_err.get() && directive.is_public && !ns_def.is_public() {
+                    let msg = format!("`{}` is private, and cannot be reexported", name);
+                    let note_msg = if let ValueNS = ns {
+                        span_err!(self.session, directive.span, E0364, "{}", &msg);
+                        format!("Consider marking `{}` as `pub` in the imported module", name)
+                    } else {
+                        span_err!(self.session, directive.span, E0365, "{}", &msg);
+                        format!("Consider declaring module `{}` as a `pub mod`", name)
+                    };
+                    self.session.span_note(directive.span, &note_msg);
+                    pub_err.set(true);
+                }
+            }
+
             return Success((Target::new(module.clone(), ns_def, Shadowable::Never), false));
         }
 
@@ -1614,7 +1626,11 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             //
             // In this case we continue as if we resolved the import and let
             // check_for_conflicts_between_imports_and_items handle the conflict.
-            Some(_) if !fail_on_indeterminate_import => return Indeterminate,
+            Some(_) => match name_search_type {
+                ImportSearch { module: origin, .. } if origin.def_id() == module.def_id() =>
+                    Failed(None),
+                _ => return Indeterminate,
+            },
 
             // The containing module definitely doesn't have an exported import with the name
             // in question. We can therecore accurately report that the names are unbound.
