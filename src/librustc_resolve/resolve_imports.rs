@@ -325,10 +325,8 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                 return self.resolve_glob_import(&directive_module, target_module, directive, lp),
         };
 
-        // pub_err makes sure we don't give the same error twice.
-        let pub_err = Cell::new(false);
         let search = ImportSearch {
-            directive: directive, module: directive_module, pub_err: &pub_err
+            directive: directive, module: directive_module, pub_err: &Cell::new(false)
         };
 
         // We need to resolve both namespaces for this to succeed.
@@ -375,7 +373,12 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             Success((mut target, used_reexport)) => {
                 let used_public = target.ns_def.is_public();
                 self.check_for_conflicting_import(&import_resolution, directive.span, name, ns);
-                self.check_that_import_is_importable(&target.ns_def, directive.span, name);
+
+                // Check that the import is actually importable
+                if !target.ns_def.defined_with(DefModifiers::IMPORTABLE) {
+                    let msg = format!("`{}` is not directly importable", name);
+                    span_err!(self.resolver.session, directive.span, E0253, "{}", &msg[..]);
+                }
 
                 target.shadowable = directive.shadowable;
                 import_resolution.target = Some(target);
@@ -463,8 +466,8 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             // This means we are trying to glob import a module into itself,
             // and it is a no-go
             debug!("(resolving glob imports) target module is current module; giving up");
-            return Failed(Some((import_directive.span,
-                                               "Cannot glob-import a module into itself.".into())));
+            let error = (import_directive.span, "Cannot glob-import a module into itself.".into());
+            return Failed(Some(error));
         }
 
         for (&(name, ns), target_import_resolution) in import_resolutions.iter() {
@@ -475,8 +478,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             // Here we merge two import resolutions.
             let mut import_resolutions = module_.import_resolutions.borrow_mut();
             if let Some(dest_import_resolution) = import_resolutions.get_mut(&(name, ns)) {
-                // Merge the two import resolutions at a finer-grained
-                // level.
+                // Merge the two import resolutions at a finer-grained level.
                 if !target_import_resolution.is_public { continue }
 
                 if let Some(ref target) = target_import_resolution.target {
@@ -487,7 +489,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                     dest_import_resolution.target = Some(target.clone());
                     dest_import_resolution.is_public = is_public;
                 }
-                
+
                 continue
             }
 
@@ -631,17 +633,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                            name);
             }
             Some(_) | None => {}
-        }
-    }
-
-    /// Checks that an import is actually importable
-    fn check_that_import_is_importable(&mut self,
-                                       ns_def: &NsDef,
-                                       import_span: Span,
-                                       name: Name) {
-        if !ns_def.defined_with(DefModifiers::IMPORTABLE) {
-            let msg = format!("`{}` is not directly importable", name);
-            span_err!(self.resolver.session, import_span, E0253, "{}", &msg[..]);
         }
     }
 

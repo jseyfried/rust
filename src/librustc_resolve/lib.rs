@@ -679,7 +679,11 @@ enum AssocItemResolveResult {
 #[derive(Copy, Clone)]
 enum NameSearchType<'a> {
     /// We're doing a name search in order to resolve a `use` directive.
-    ImportSearch { directive: &'a ImportDirective, module: &'a Module, pub_err: &'a Cell<bool> },
+    ImportSearch {
+        directive: &'a ImportDirective,
+        module: &'a Module,
+        pub_err: &'a Cell<bool>, //< makes sure we don't give the same error twice.
+    },
 
     /// We're doing a name search in order to resolve a path type, a path
     /// expression, or a path pattern.
