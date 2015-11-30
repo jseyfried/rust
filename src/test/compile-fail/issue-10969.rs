@@ -8,6 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![staged_api] //~ ERROR staged_api is for use by rustc only
-
-fn main() { }
+fn func(i: i32) { //~NOTE defined here
+    i(); //~ERROR expected function, found `i32`
+}
+fn main() {
+    let i = 0i32; //~NOTE defined here
+    i(); //~ERROR expected function, found `i32`
+}

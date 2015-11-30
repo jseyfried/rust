@@ -38,7 +38,7 @@ use super::util;
 
 use middle::def_id::DefId;
 use middle::infer;
-use middle::infer::{InferCtxt, TypeFreshener};
+use middle::infer::{InferCtxt, TypeFreshener, TypeOrigin};
 use middle::subst::{Subst, Substs, TypeSpace};
 use middle::ty::{self, ToPredicate, RegionEscape, ToPolyTraitRef, Ty, HasTypeFlags};
 use middle::ty::fast_reject;
@@ -1155,7 +1155,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                         -> bool
     {
         assert!(!skol_trait_ref.has_escaping_regions());
-        let origin = infer::RelateOutputImplTypes(obligation.cause.span);
+        let origin = TypeOrigin::RelateOutputImplTypes(obligation.cause.span);
         match self.infcx.sub_poly_trait_refs(false,
                                              origin,
                                              trait_bound.clone(),
@@ -1563,7 +1563,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         }
 
         match other {
-            &ObjectCandidate(..) |
+            &ObjectCandidate |
             &ParamCandidate(_) | &ProjectionCandidate => match victim {
                 &DefaultImplCandidate(..) => {
                     self.tcx().sess.bug(
@@ -1572,16 +1572,16 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 }
                 &ImplCandidate(..) |
                 &ClosureCandidate(..) |
-                &FnPointerCandidate(..) |
-                &BuiltinObjectCandidate(..) |
-                &BuiltinUnsizeCandidate(..) |
+                &FnPointerCandidate |
+                &BuiltinObjectCandidate |
+                &BuiltinUnsizeCandidate |
                 &DefaultImplObjectCandidate(..) |
                 &BuiltinCandidate(..) => {
                     // We have a where-clause so don't go around looking
                     // for impls.
                     true
                 }
-                &ObjectCandidate(..) |
+                &ObjectCandidate |
                 &ProjectionCandidate => {
                     // Arbitrarily give param candidates priority
                     // over projection and object candidates.
@@ -2444,7 +2444,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                                expected_trait_ref: ty::PolyTraitRef<'tcx>)
                                -> Result<(), SelectionError<'tcx>>
     {
-        let origin = infer::RelateOutputImplTypes(obligation_cause.span);
+        let origin = TypeOrigin::RelateOutputImplTypes(obligation_cause.span);
 
         let obligation_trait_ref = obligation_trait_ref.clone();
         match self.infcx.sub_poly_trait_refs(false,
@@ -2483,7 +2483,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 };
 
                 let new_trait = tcx.mk_trait(data_a.principal.clone(), bounds);
-                let origin = infer::Misc(obligation.cause.span);
+                let origin = TypeOrigin::Misc(obligation.cause.span);
                 if self.infcx.sub_types(false, origin, new_trait, target).is_err() {
                     return Err(Unimplemented);
                 }
@@ -2548,7 +2548,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
 
             // [T; n] -> [T].
             (&ty::TyArray(a, _), &ty::TySlice(b)) => {
-                let origin = infer::Misc(obligation.cause.span);
+                let origin = TypeOrigin::Misc(obligation.cause.span);
                 if self.infcx.sub_types(false, origin, a, b).is_err() {
                     return Err(Unimplemented);
                 }
@@ -2606,7 +2606,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     new_substs.types.get_mut_slice(TypeSpace)[i] = param_b;
                 }
                 let new_struct = tcx.mk_struct(def, tcx.mk_substs(new_substs));
-                let origin = infer::Misc(obligation.cause.span);
+                let origin = TypeOrigin::Misc(obligation.cause.span);
                 if self.infcx.sub_types(false, origin, new_struct, target).is_err() {
                     return Err(Unimplemented);
                 }
@@ -2694,12 +2694,12 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                impl_trait_ref,
                skol_obligation_trait_ref);
 
-        let origin = infer::RelateOutputImplTypes(obligation.cause.span);
-        if let Err(e) = self.infcx.sub_trait_refs(false,
-                                                  origin,
-                                                  impl_trait_ref.value.clone(),
-                                                  skol_obligation_trait_ref) {
-            debug!("match_impl: failed sub_trait_refs due to `{}`", e);
+        let origin = TypeOrigin::RelateOutputImplTypes(obligation.cause.span);
+        if let Err(e) = self.infcx.eq_trait_refs(false,
+                                                 origin,
+                                                 impl_trait_ref.value.clone(),
+                                                 skol_obligation_trait_ref) {
+            debug!("match_impl: failed eq_trait_refs due to `{}`", e);
             return Err(());
         }
 
@@ -2763,7 +2763,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                obligation,
                poly_trait_ref);
 
-        let origin = infer::RelateOutputImplTypes(obligation.cause.span);
+        let origin = TypeOrigin::RelateOutputImplTypes(obligation.cause.span);
         match self.infcx.sub_poly_trait_refs(false,
                                              origin,
                                              poly_trait_ref,

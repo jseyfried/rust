@@ -677,8 +677,8 @@ apply to the crate as a whole.
 ```
 
 A crate that contains a `main` function can be compiled to an executable. If a
-`main` function is present, its return type must be [`unit`](#tuple-types)
-and it must take no arguments.
+`main` function is present, its return type must be `()`
+("[unit](#tuple-types)") and it must take no arguments.
 
 # Items and attributes
 
@@ -2324,10 +2324,6 @@ The currently implemented features of the reference compiler are:
 
 * `simd_ffi` - Allows use of SIMD vectors in signatures for foreign functions.
                The SIMD interface is subject to change.
-
-* `staged_api` - Allows usage of stability markers and `#![staged_api]` in a
-                 crate. Stability markers are also attributes: `#[stable]`,
-                 `#[unstable]`, and `#[rustc_deprecated]` are the three levels.
 
 * `start` - Allows use of the `#[start]` attribute, which changes the entry point
             into a Rust program. This capability, especially the signature for the

@@ -33,7 +33,7 @@ use middle::ty::TyProjection;
 use middle::ty::util::CopyImplementationError;
 use middle::free_region::FreeRegionMap;
 use CrateCtxt;
-use middle::infer::{self, InferCtxt, new_infer_ctxt};
+use middle::infer::{self, InferCtxt, TypeOrigin, new_infer_ctxt};
 use std::cell::RefCell;
 use std::rc::Rc;
 use syntax::codemap::Span;
@@ -69,7 +69,7 @@ fn get_base_type_def_id<'a, 'tcx>(inference_context: &InferCtxt<'a, 'tcx>,
         }
 
         TyBool | TyChar | TyInt(..) | TyUint(..) | TyFloat(..) |
-        TyStr(..) | TyArray(..) | TySlice(..) | TyBareFn(..) | TyTuple(..) |
+        TyStr | TyArray(..) | TySlice(..) | TyBareFn(..) | TyTuple(..) |
         TyParam(..) | TyError |
         TyRawPtr(_) | TyRef(_, _) | TyProjection(..) => {
             None
@@ -406,7 +406,7 @@ impl<'a, 'tcx> CoherenceChecker<'a, 'tcx> {
                         return;
                     }
 
-                    let origin = infer::Misc(span);
+                    let origin = TypeOrigin::Misc(span);
                     let fields = &def_a.struct_variant().fields;
                     let diff_fields = fields.iter().enumerate().filter_map(|(i, f)| {
                         let (a, b) = (f.ty(tcx, substs_a), f.ty(tcx, substs_b));

@@ -25,12 +25,14 @@ use rustc_typeck::middle::subst;
 use rustc_typeck::middle::subst::Subst;
 use rustc_typeck::middle::ty::{self, Ty, RegionEscape};
 use rustc_typeck::middle::ty::relate::TypeRelation;
-use rustc_typeck::middle::infer;
+use rustc_typeck::middle::infer::{self, TypeOrigin};
 use rustc_typeck::middle::infer::lub::Lub;
 use rustc_typeck::middle::infer::glb::Glb;
 use rustc_typeck::middle::infer::sub::Sub;
+use rustc_metadata::cstore::CStore;
 use rustc::front::map as hir_map;
 use rustc::session::{self, config};
+use std::rc::Rc;
 use syntax::{abi, ast};
 use syntax::codemap;
 use syntax::codemap::{Span, CodeMap, DUMMY_SP};
@@ -107,12 +109,14 @@ fn test_env<F>(source_string: &str,
     let diagnostic_handler = diagnostic::Handler::with_emitter(true, emitter);
     let span_diagnostic_handler = diagnostic::SpanHandler::new(diagnostic_handler, codemap);
 
-    let sess = session::build_session_(options, None, span_diagnostic_handler);
+    let cstore = Rc::new(CStore::new(token::get_ident_interner()));
+    let sess = session::build_session_(options, None, span_diagnostic_handler,
+                                       cstore.clone());
     rustc_lint::register_builtins(&mut sess.lint_store.borrow_mut(), Some(&sess));
     let krate_config = Vec::new();
     let input = config::Input::Str(source_string.to_string());
     let krate = driver::phase_1_parse_input(&sess, krate_config, &input);
-    let krate = driver::phase_2_configure_and_expand(&sess, krate, "test", None)
+    let krate = driver::phase_2_configure_and_expand(&sess, &cstore, krate, "test", None)
                     .expect("phase 2 aborted");
 
     let krate = driver::assign_node_ids(&sess, krate);
@@ -230,7 +234,7 @@ impl<'a, 'tcx> Env<'a, 'tcx> {
     }
 
     pub fn make_subtype(&self, a: Ty<'tcx>, b: Ty<'tcx>) -> bool {
-        match infer::mk_subty(self.infcx, true, infer::Misc(DUMMY_SP), a, b) {
+        match infer::mk_subty(self.infcx, true, TypeOrigin::Misc(DUMMY_SP), a, b) {
             Ok(_) => true,
             Err(ref e) => panic!("Encountered error: {}", e),
         }

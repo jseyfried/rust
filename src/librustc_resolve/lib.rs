@@ -12,7 +12,7 @@
 #![cfg_attr(stage0, feature(custom_attribute))]
 #![crate_name = "rustc_resolve"]
 #![unstable(feature = "rustc_private", issue = "27812")]
-#![staged_api]
+#![cfg_attr(stage0, staged_api)]
 #![crate_type = "dylib"]
 #![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
@@ -53,8 +53,7 @@ use self::FallbackChecks::*;
 use rustc::front::map as hir_map;
 use rustc::session::Session;
 use rustc::lint;
-use rustc::metadata::csearch;
-use rustc::metadata::decoder::{DefLike, DlDef};
+use rustc::middle::cstore::{CrateStore, DefLike, DlDef};
 use rustc::middle::def::*;
 use rustc::middle::def_id::DefId;
 use rustc::middle::pat_util::pat_bindings_hygienic;
@@ -62,7 +61,6 @@ use rustc::middle::privacy::*;
 use rustc::middle::subst::{ParamSpace, FnSpace, TypeSpace};
 use rustc::middle::ty::{Freevar, FreevarMap, TraitMap, GlobMap};
 use rustc::util::nodemap::{NodeMap, DefIdSet, FnvHashMap};
-use rustc::util::lev_distance::lev_distance;
 
 use syntax::ast;
 use syntax::ast::{CRATE_NODE_ID, Ident, Name, NodeId, CrateNum, TyIs, TyI8, TyI16, TyI32, TyI64};
@@ -72,6 +70,7 @@ use syntax::ext::mtwt;
 use syntax::parse::token::{self, special_names, special_idents};
 use syntax::ptr::P;
 use syntax::codemap::{self, Span, Pos};
+use syntax::util::lev_distance::{lev_distance, max_suggestion_distance};
 
 use rustc_front::intravisit::{self, FnKind, Visitor};
 use rustc_front::hir;
@@ -595,7 +594,7 @@ impl<'a, 'v, 'tcx> Visitor<'v> for Resolver<'a, 'tcx> {
                 self.visit_explicit_self(&sig.explicit_self);
                 MethodRibKind
             }
-            FnKind::Closure(..) => ClosureRibKind(node_id),
+            FnKind::Closure => ClosureRibKind(node_id),
         };
         self.resolve_function(rib_kind, declaration, block);
     }
@@ -1122,7 +1121,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         if let Some(node_id) = self.ast_map.as_local_node_id(did) {
             self.ast_map.expect_item(node_id).name
         } else {
-            csearch::get_trait_name(&self.session.cstore, did)
+            self.session.cstore.item_name(did)
         }
     }
 
@@ -3098,7 +3097,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                 };
                 sig.explicit_self.node == hir::SelfStatic
             } else {
-                csearch::is_static_method(&this.session.cstore, did)
+                this.session.cstore.is_static_method(did)
             }
         }
 
@@ -3184,11 +3183,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             }
         }
 
-        // As a loose rule to avoid obviously incorrect suggestions, clamp the
-        // maximum edit distance we will accept for a suggestion to one third of
-        // the typo'd name's length.
-        let max_distance = std::cmp::max(name.len(), 3) / 3;
-
+        let max_distance = max_suggestion_distance(name);
         if !values.is_empty() && values[smallest] <= max_distance && name != &maybes[smallest][..] {
 
             SuggestionType::Function(maybes[smallest].to_string())

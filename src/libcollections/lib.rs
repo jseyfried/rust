@@ -16,7 +16,7 @@
 // Do not remove on snapshot creation. Needed for bootstrap. (Issue #22364)
 #![cfg_attr(stage0, feature(custom_attribute))]
 #![crate_name = "collections"]
-#![staged_api]
+#![cfg_attr(stage0, staged_api)]
 #![crate_type = "rlib"]
 #![unstable(feature = "collections",
             reason = "library is unlikely to be stabilized with the current \
@@ -76,8 +76,11 @@
 extern crate rustc_unicode;
 extern crate alloc;
 
-#[cfg(test)] #[macro_use] extern crate std;
-#[cfg(test)] extern crate test;
+#[cfg(test)]
+#[macro_use]
+extern crate std;
+#[cfg(test)]
+extern crate test;
 
 pub use binary_heap::BinaryHeap;
 pub use btree_map::BTreeMap;

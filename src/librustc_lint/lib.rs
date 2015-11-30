@@ -13,7 +13,7 @@
 //! This currently only contains the definitions and implementations
 //! of most of the lints that `rustc` supports directly, it does not
 //! contain the infrastructure for defining/registering lints. That is
-//! available in `rustc::lint` and `rustc::plugin` respectively.
+//! available in `rustc::lint` and `rustc_plugin` respectively.
 //!
 //! # Note
 //!
@@ -23,7 +23,7 @@
 #![cfg_attr(stage0, feature(custom_attribute))]
 #![crate_name = "rustc_lint"]
 #![unstable(feature = "rustc_private", issue = "27812")]
-#![staged_api]
+#![cfg_attr(stage0, staged_api)]
 #![crate_type = "dylib"]
 #![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
@@ -50,7 +50,6 @@ extern crate rustc_front;
 extern crate rustc_back;
 
 pub use rustc::lint as lint;
-pub use rustc::metadata as metadata;
 pub use rustc::middle as middle;
 pub use rustc::session as session;
 pub use rustc::util as util;

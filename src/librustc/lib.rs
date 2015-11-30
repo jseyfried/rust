@@ -18,7 +18,7 @@
 #![cfg_attr(stage0, feature(custom_attribute))]
 #![crate_name = "rustc"]
 #![unstable(feature = "rustc_private", issue = "27812")]
-#![staged_api]
+#![cfg_attr(stage0, staged_api)]
 #![crate_type = "dylib"]
 #![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
@@ -33,7 +33,6 @@
 #![feature(const_fn)]
 #![feature(core)]
 #![feature(duration_span)]
-#![feature(dynamic_lib)]
 #![feature(enumset)]
 #![feature(hashmap_hasher)]
 #![feature(into_cow)]
@@ -68,7 +67,6 @@ extern crate rustc_back;
 extern crate rustc_front;
 extern crate rustc_data_structures;
 extern crate serialize;
-extern crate rbml;
 extern crate collections;
 #[macro_use] extern crate log;
 #[macro_use] extern crate syntax;
@@ -100,9 +98,8 @@ pub mod front {
 }
 
 pub mod middle {
-    pub mod expr_use_visitor; // STAGE0: increase glitch immunity
     pub mod astconv_util;
-    pub mod astencode;
+    pub mod expr_use_visitor; // STAGE0: increase glitch immunity
     pub mod cfg;
     pub mod check_const;
     pub mod check_static_recursion;
@@ -111,6 +108,7 @@ pub mod middle {
     pub mod check_no_asm;
     pub mod check_rvalues;
     pub mod const_eval;
+    pub mod cstore;
     pub mod dataflow;
     pub mod dead;
     pub mod def;
@@ -138,11 +136,7 @@ pub mod middle {
     pub mod weak_lang_items;
 }
 
-pub mod metadata;
-
 pub mod session;
-
-pub mod plugin;
 
 pub mod lint;
 
@@ -152,7 +146,6 @@ pub mod util {
     pub mod common;
     pub mod ppaux;
     pub mod nodemap;
-    pub mod lev_distance;
     pub mod num;
     pub mod fs;
 }

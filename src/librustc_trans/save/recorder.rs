@@ -13,7 +13,7 @@ pub use self::Row::*;
 use super::escape;
 use super::span_utils::SpanUtils;
 
-use metadata::cstore::LOCAL_CRATE;
+use middle::cstore::LOCAL_CRATE;
 use middle::def_id::{CRATE_DEF_INDEX, DefId};
 use middle::ty;
 
@@ -665,7 +665,7 @@ impl<'a, 'tcx: 'a> FmtStrs<'a, 'tcx> {
     pub fn external_crate_str(&mut self, span: Span, name: &str, num: ast::CrateNum) {
         let lo_loc = self.span.sess.codemap().lookup_char_pos(span.lo);
         self.record_without_span(ExternalCrate,
-                                 svec!(name, num, lo_loc.file.name),
+                                 svec!(name, num, SpanUtils::make_path_string(&lo_loc.file.name)),
                                  span);
     }
 

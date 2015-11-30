@@ -15,12 +15,11 @@ pub use self::StabilityLevel::*;
 
 use session::Session;
 use lint;
-use metadata::cstore::LOCAL_CRATE;
+use middle::cstore::{CrateStore, LOCAL_CRATE};
 use middle::def;
 use middle::def_id::{CRATE_DEF_INDEX, DefId};
 use middle::ty;
 use middle::privacy::AccessLevels;
-use metadata::csearch;
 use syntax::parse::token::InternedString;
 use syntax::codemap::{Span, DUMMY_SP};
 use syntax::ast;
@@ -85,7 +84,7 @@ impl<'a, 'tcx: 'a> Annotator<'a, 'tcx> {
                    item_sp: Span, kind: AnnotationKind, visit_children: F)
         where F: FnOnce(&mut Annotator)
     {
-        if self.index.staged_api[&LOCAL_CRATE] {
+        if self.index.staged_api[&LOCAL_CRATE] && self.tcx.sess.features.borrow().staged_api {
             debug!("annotate(id = {:?}, attrs = {:?})", id, attrs);
             if let Some(mut stab) = attr::find_stability(self.tcx.sess.diagnostic(),
                                                          attrs, item_sp) {
@@ -279,17 +278,15 @@ impl<'tcx> Index<'tcx> {
                            |v| intravisit::walk_crate(v, krate));
     }
 
-    pub fn new(krate: &Crate) -> Index {
+    pub fn new(krate: &Crate) -> Index<'tcx> {
         let mut is_staged_api = false;
         for attr in &krate.attrs {
-            if attr.name() == "staged_api" {
-                if let ast::MetaWord(_) = attr.node.value.node {
-                    attr::mark_used(attr);
-                    is_staged_api = true;
-                    break
-                }
+            if attr.name() == "stable" || attr.name() == "unstable" {
+                is_staged_api = true;
+                break
             }
         }
+
         let mut staged_api = FnvHashMap();
         staged_api.insert(LOCAL_CRATE, is_staged_api);
         Index {
@@ -450,7 +447,7 @@ pub fn check_item(tcx: &ty::ctxt, item: &hir::Item, warn_about_defns: bool,
             // compiler-generated `extern crate` items have a dummy span.
             if item.span == DUMMY_SP { return }
 
-            let cnum = match tcx.sess.cstore.find_extern_mod_stmt_cnum(item.id) {
+            let cnum = match tcx.sess.cstore.extern_mod_stmt_cnum(item.id) {
                 Some(cnum) => cnum,
                 None => return,
             };
@@ -623,7 +620,7 @@ fn is_staged_api(tcx: &ty::ctxt, id: DefId) -> bool {
             }
         _ => {
             *tcx.stability.borrow_mut().staged_api.entry(id.krate).or_insert_with(
-                || csearch::is_staged_api(&tcx.sess.cstore, id.krate))
+                || tcx.sess.cstore.is_staged_api(id.krate))
         }
     }
 }
@@ -655,7 +652,7 @@ fn lookup_uncached<'tcx>(tcx: &ty::ctxt<'tcx>, id: DefId) -> Option<&'tcx Stabil
     let item_stab = if id.is_local() {
         None // The stability cache is filled partially lazily
     } else {
-        csearch::get_stability(&tcx.sess.cstore, id).map(|st| tcx.intern_stability(st))
+        tcx.sess.cstore.stability(id).map(|st| tcx.intern_stability(st))
     };
 
     item_stab.or_else(|| {

@@ -24,6 +24,7 @@ use parse::token;
 use parse::token::{InternedString, intern, str_to_ident};
 use ptr::P;
 use util::small_vector::SmallVector;
+use util::lev_distance::{lev_distance, max_suggestion_distance};
 use ext::mtwt;
 use fold::Folder;
 
@@ -678,9 +679,9 @@ impl<'a> ExtCtxt<'a> {
     pub fn bt_push(&mut self, ei: ExpnInfo) {
         self.recursion_count += 1;
         if self.recursion_count > self.ecfg.recursion_limit {
-            panic!(self.span_fatal(ei.call_site,
+            self.span_fatal(ei.call_site,
                             &format!("recursion limit reached while expanding the macro `{}`",
-                                    ei.callee.name())));
+                                    ei.callee.name()));
         }
 
         let mut call_site = ei.call_site;
@@ -775,6 +776,20 @@ impl<'a> ExtCtxt<'a> {
     }
     pub fn name_of(&self, st: &str) -> ast::Name {
         token::intern(st)
+    }
+
+    pub fn suggest_macro_name(&mut self, name: &str, span: Span) {
+        let mut min: Option<(Name, usize)> = None;
+        let max_dist = max_suggestion_distance(name);
+        for macro_name in self.syntax_env.names.iter() {
+            let dist = lev_distance(name, &macro_name.as_str());
+            if dist <= max_dist && (min.is_none() || min.unwrap().1 > dist) {
+                min = Some((*macro_name, dist));
+            }
+        }
+        if let Some((suggestion, _)) = min {
+            self.fileline_help(span, &format!("did you mean `{}!`?", suggestion));
+        }
     }
 }
 

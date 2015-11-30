@@ -18,7 +18,7 @@
 #![cfg_attr(stage0, feature(custom_attribute))]
 #![crate_name = "syntax"]
 #![unstable(feature = "rustc_private", issue = "27812")]
-#![staged_api]
+#![cfg_attr(stage0, staged_api)]
 #![crate_type = "dylib"]
 #![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
@@ -65,6 +65,7 @@ macro_rules! panictry {
 
 pub mod util {
     pub mod interner;
+    pub mod lev_distance;
     pub mod node_count;
     pub mod parser;
     #[cfg(test)]

@@ -1899,49 +1899,83 @@ contain references (with a maximum lifetime of `'a`).
 [1]: https://github.com/rust-lang/rfcs/pull/1156
 "##,
 
-E0454: r##"
-A link name was given with an empty name. Erroneous code example:
+E0492: r##"
+A borrow of a constant containing interior mutability was attempted. Erroneous
+code example:
 
 ```
-#[link(name = "")] extern {} // error: #[link(name = "")] given with empty name
+use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT};
+
+const A: AtomicUsize = ATOMIC_USIZE_INIT;
+static B: &'static AtomicUsize = &A;
+// error: cannot borrow a constant which contains interior mutability, create a
+//        static instead
 ```
 
-The rust compiler cannot link to an external library if you don't give it its
-name. Example:
+A `const` represents a constant value that should never change. If one takes
+a `&` reference to the constant, then one is taking a pointer to some memory
+location containing the value. Normally this is perfectly fine: most values
+can't be changed via a shared `&` pointer, but interior mutability would allow
+it. That is, a constant value could be mutated. On the other hand, a `static` is
+explicitly a single memory location, which can be mutated at will.
+
+So, in order to solve this error, either use statics which are `Sync`:
 
 ```
-#[link(name = "some_lib")] extern {} // ok!
-```
-"##,
+use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT};
 
-E0458: r##"
-An unknown "kind" was specified for a link attribute. Erroneous code example:
-
-```
-#[link(kind = "wonderful_unicorn")] extern {}
-// error: unknown kind: `wonderful_unicorn`
+static A: AtomicUsize = ATOMIC_USIZE_INIT;
+static B: &'static AtomicUsize = &A; // ok!
 ```
 
-Please specify a valid "kind" value, from one of the following:
- * static
- * dylib
- * framework
-"##,
-
-E0459: r##"
-A link was used without a name parameter. Erroneous code example:
+You can also have this error while using a cell type:
 
 ```
-#[link(kind = "dylib")] extern {}
-// error: #[link(...)] specified without `name = "foo"`
+#![feature(const_fn)]
+
+use std::cell::Cell;
+
+const A: Cell<usize> = Cell::new(1);
+const B: &'static Cell<usize> = &A;
+// error: cannot borrow a constant which contains interior mutability, create
+//        a static instead
+
+// or:
+struct C { a: Cell<usize> }
+
+const D: C = C { a: Cell::new(1) };
+const E: &'static Cell<usize> = &D.a; // error
+
+// or:
+const F: &'static C = &D; // error
 ```
 
-Please add the name parameter to allow the rust compiler to find the library
-you want. Example:
+This is because cell types internally use `UnsafeCell`, which isn't `Sync`.
+These aren't thread safe, and thus can't be placed in statics. In this case,
+`StaticMutex` would work just fine, but it isn't stable yet:
+https://doc.rust-lang.org/nightly/std/sync/struct.StaticMutex.html
+
+However, if you still wish to use these types, you can achieve this by an unsafe
+wrapper:
 
 ```
-#[link(kind = "dylib", name = "some_lib")] extern {} // ok!
+#![feature(const_fn)]
+
+use std::cell::Cell;
+use std::marker::Sync;
+
+struct NotThreadSafe<T> {
+    value: Cell<T>,
+}
+
+unsafe impl<T> Sync for NotThreadSafe<T> {}
+
+static A: NotThreadSafe<usize> = NotThreadSafe { value : Cell::new(1) };
+static B: &'static NotThreadSafe<usize> = &A; // ok!
 ```
+
+Remember this solution is unsafe! You will have to ensure that accesses to the
+cell are synchronized.
 "##,
 
 E0493: r##"
@@ -2011,7 +2045,6 @@ impl<'a> Foo<'a> {
 ```
 
 Please change the name of one of the lifetimes to remove this error. Example:
-
 
 ```
 struct Foo<'a> {
@@ -2115,6 +2148,7 @@ If you wish to apply this attribute to all methods in an impl, manually annotate
 each method; it is not possible to annotate the entire impl with an `#[inline]`
 attribute.
 "##,
+
 }
 
 
@@ -2144,20 +2178,6 @@ register_diagnostics! {
     E0400, // overloaded derefs are not allowed in constants
     E0452, // malformed lint attribute
     E0453, // overruled by outer forbid
-    E0455, // native frameworks are only available on OSX targets
-    E0456, // plugin `..` is not available for triple `..`
-    E0457, // plugin `..` only found in rlib format, but must be available...
-    E0460, // found possibly newer version of crate `..`
-    E0461, // couldn't find crate `..` with expected target triple ..
-    E0462, // found staticlib `..` instead of rlib or dylib
-    E0463, // can't find crate for `..`
-    E0464, // multiple matching crates for `..`
-    E0465, // multiple .. candidates for `..` found
-    E0466, // bad macro import
-    E0467, // bad macro reexport
-    E0468, // an `extern crate` loading macros must be at the crate root
-    E0469, // imported macro not found
-    E0470, // reexported macro not found
     E0471, // constant evaluation error: ..
     E0472, // asm! is unsupported on this target
     E0473, // dereference of reference outside its lifetime
@@ -2179,8 +2199,5 @@ register_diagnostics! {
     E0489, // type/lifetime parameter not in scope here
     E0490, // a value of type `..` is borrowed for too long
     E0491, // in type `..`, reference has a longer lifetime than the data it...
-    E0492, // cannot borrow a constant which contains interior mutability
     E0495, // cannot infer an appropriate lifetime due to conflicting requirements
-    E0498, // malformed plugin attribute
-    E0514, // metadata version mismatch
 }

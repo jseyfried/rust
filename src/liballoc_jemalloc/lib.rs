@@ -11,7 +11,7 @@
 #![cfg_attr(stage0, feature(custom_attribute))]
 #![crate_name = "alloc_jemalloc"]
 #![crate_type = "rlib"]
-#![staged_api]
+#![cfg_attr(stage0, staged_api)]
 #![no_std]
 #![cfg_attr(not(stage0), allocator)]
 #![cfg_attr(stage0, allow(improper_ctypes))]
@@ -41,7 +41,7 @@ use libc::{c_int, c_void, size_t};
                not(target_os = "android"),
                not(target_env = "musl")),
            link(name = "pthread"))]
-extern {
+extern "C" {
     fn je_mallocx(size: size_t, flags: c_int) -> *mut c_void;
     fn je_rallocx(ptr: *mut c_void, size: size_t, flags: c_int) -> *mut c_void;
     fn je_xallocx(ptr: *mut c_void, size: size_t, extra: size_t, flags: c_int) -> size_t;

@@ -22,22 +22,21 @@ pub use self::duration::Duration;
 
 mod duration;
 
-/// A measurement of a monotonically increasing clock which is suitable for
-/// measuring the amount of time that an operation takes.
+/// A measurement of a monotonically increasing clock.
 ///
-/// Instants are guaranteed always be greater than any previously measured
+/// Instants are always guaranteed to be greater than any previously measured
 /// instant when created, and are often useful for tasks such as measuring
 /// benchmarks or timing how long an operation takes.
 ///
 /// Note, however, that instants are not guaranteed to be **steady**.  In other
-/// words each tick of the underlying clock may not be the same length (e.g.
+/// words, each tick of the underlying clock may not be the same length (e.g.
 /// some seconds may be longer than others). An instant may jump forwards or
 /// experience time dilation (slow down or speed up), but it will never go
 /// backwards.
 ///
 /// Instants are opaque types that can only be compared to one another. There is
-/// no method to get "the number of seconds" from an instant but instead it only
-/// allow learning the duration between two instants (or comparing two
+/// no method to get "the number of seconds" from an instant. Instead, it only
+/// allows measuring the duration between two instants (or comparing two
 /// instants).
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[unstable(feature = "time2", reason = "recently added", issue = "29866")]
@@ -60,7 +59,7 @@ pub struct Instant(time::Instant);
 /// Although a `SystemTime` cannot be directly inspected, the `UNIX_EPOCH`
 /// constant is provided in this module as an anchor in time to learn
 /// information about a `SystemTime`. By calculating the duration from this
-/// fixed point in time a `SystemTime` can be converted to a human-readable time
+/// fixed point in time, a `SystemTime` can be converted to a human-readable time,
 /// or perhaps some other string representation.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[unstable(feature = "time2", reason = "recently added", issue = "29866")]
@@ -95,8 +94,9 @@ impl Instant {
     ///
     /// # Panics
     ///
-    /// This function may panic if the current time is earlier than this instant
-    /// which can happen if an `Instant` is produced synthetically.
+    /// This function may panic if the current time is earlier than this
+    /// instant, which is something that can happen if an `Instant` is
+    /// produced synthetically.
     pub fn elapsed(&self) -> Duration {
         Instant::now().duration_from_earlier(*self)
     }
@@ -140,7 +140,7 @@ impl SystemTime {
     /// guaranteed to always be before later measurements (due to anomalies such
     /// as the system clock being adjusted either forwards or backwards).
     ///
-    /// If successful, `Ok(duration)` is returned where the duration represents
+    /// If successful, `Ok(Duration)` is returned where the duration represents
     /// the amount of time elapsed from the specified measurement to this one.
     ///
     /// Returns an `Err` if `earlier` is later than `self`, and the error
@@ -207,9 +207,8 @@ impl SystemTimeError {
     /// second system time was from the first.
     ///
     /// A `SystemTimeError` is returned from the `duration_from_earlier`
-    /// operation whenever the second duration, `earlier`, actually represents a
-    /// point later in time than the `self` of the method call. This function
-    /// will extract and return the amount of time later `earlier` actually is.
+    /// operation whenever the second system time represents a point later
+    /// in time than the `self` of the method call.
     pub fn duration(&self) -> Duration {
         self.0
     }
@@ -231,6 +230,16 @@ impl fmt::Display for SystemTimeError {
 mod tests {
     use super::{Instant, SystemTime, Duration, UNIX_EPOCH};
 
+    macro_rules! assert_almost_eq {
+        ($a:expr, $b:expr) => ({
+            let (a, b) = ($a, $b);
+            if a != b {
+                let (a, b) = if a > b {(a, b)} else {(b, a)};
+                assert!(a - Duration::new(0, 1) <= b);
+            }
+        })
+    }
+
     #[test]
     fn instant_monotonic() {
         let a = Instant::now();
@@ -249,11 +258,11 @@ mod tests {
         let a = Instant::now();
         let b = Instant::now();
         let dur = b.duration_from_earlier(a);
-        assert_eq!(b - dur, a);
-        assert_eq!(a + dur, b);
+        assert_almost_eq!(b - dur, a);
+        assert_almost_eq!(a + dur, b);
 
         let second = Duration::new(1, 0);
-        assert_eq!(a - second + second, a);
+        assert_almost_eq!(a - second + second, a);
     }
 
     #[test]
@@ -269,31 +278,31 @@ mod tests {
         let b = SystemTime::now();
         match b.duration_from_earlier(a) {
             Ok(dur) if dur == Duration::new(0, 0) => {
-                assert_eq!(a, b);
+                assert_almost_eq!(a, b);
             }
             Ok(dur) => {
                 assert!(b > a);
-                assert_eq!(b - dur, a);
-                assert_eq!(a + dur, b);
+                assert_almost_eq!(b - dur, a);
+                assert_almost_eq!(a + dur, b);
             }
             Err(dur) => {
                 let dur = dur.duration();
                 assert!(a > b);
-                assert_eq!(b + dur, a);
-                assert_eq!(b - dur, a);
+                assert_almost_eq!(b + dur, a);
+                assert_almost_eq!(b - dur, a);
             }
         }
 
         let second = Duration::new(1, 0);
-        assert_eq!(a.duration_from_earlier(a - second).unwrap(), second);
-        assert_eq!(a.duration_from_earlier(a + second).unwrap_err().duration(),
-                   second);
+        assert_almost_eq!(a.duration_from_earlier(a - second).unwrap(), second);
+        assert_almost_eq!(a.duration_from_earlier(a + second).unwrap_err()
+                           .duration(), second);
 
-        assert_eq!(a - second + second, a);
+        assert_almost_eq!(a - second + second, a);
 
         let eighty_years = second * 60 * 60 * 24 * 365 * 80;
-        assert_eq!(a - eighty_years + eighty_years, a);
-        assert_eq!(a - (eighty_years * 10) + (eighty_years * 10), a);
+        assert_almost_eq!(a - eighty_years + eighty_years, a);
+        assert_almost_eq!(a - (eighty_years * 10) + (eighty_years * 10), a);
     }
 
     #[test]

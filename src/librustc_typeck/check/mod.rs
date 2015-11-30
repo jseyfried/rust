@@ -83,12 +83,12 @@ use self::TupleArgumentsFlag::*;
 use astconv::{self, ast_region_to_region, ast_ty_to_ty, AstConv, PathParamMode};
 use check::_match::pat_ctxt;
 use fmt_macros::{Parser, Piece, Position};
-use metadata::cstore::LOCAL_CRATE;
 use middle::astconv_util::prohibit_type_params;
+use middle::cstore::LOCAL_CRATE;
 use middle::def;
 use middle::def_id::DefId;
 use middle::infer;
-use middle::infer::type_variable;
+use middle::infer::{TypeOrigin, type_variable};
 use middle::pat_util::{self, pat_id_map};
 use middle::privacy::{AllPublic, LastMod};
 use middle::subst::{self, Subst, Substs, VecPerParamSpace, ParamSpace, TypeSpace};
@@ -110,7 +110,6 @@ use TypeAndSubsts;
 use lint;
 use util::common::{block_query, ErrorReported, indenter, loop_query};
 use util::nodemap::{DefIdMap, FnvHashMap, NodeMap};
-use util::lev_distance::lev_distance;
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::{HashSet};
@@ -123,6 +122,7 @@ use syntax::codemap::{self, Span, Spanned};
 use syntax::owned_slice::OwnedSlice;
 use syntax::parse::token::{self, InternedString};
 use syntax::ptr::P;
+use syntax::util::lev_distance::lev_distance;
 
 use rustc_front::intravisit::{self, Visitor};
 use rustc_front::hir;
@@ -1446,7 +1446,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                               -> Option<(ty::AdtDef<'tcx>, ty::VariantDef<'tcx>)>
     {
         let (adt, variant) = match def {
-            def::DefVariant(enum_id, variant_id, true) => {
+            def::DefVariant(enum_id, variant_id, _) => {
                 let adt = self.tcx().lookup_adt_def(enum_id);
                 (adt, adt.variant_with_id(variant_id))
             }
@@ -1610,7 +1610,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     pub fn mk_subty(&self,
                     a_is_expected: bool,
-                    origin: infer::TypeOrigin,
+                    origin: TypeOrigin,
                     sub: Ty<'tcx>,
                     sup: Ty<'tcx>)
                     -> Result<(), TypeError<'tcx>> {
@@ -1619,7 +1619,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     pub fn mk_eqty(&self,
                    a_is_expected: bool,
-                   origin: infer::TypeOrigin,
+                   origin: TypeOrigin,
                    sub: Ty<'tcx>,
                    sup: Ty<'tcx>)
                    -> Result<(), TypeError<'tcx>> {
@@ -1897,7 +1897,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 if let Some(default) = default_map.get(ty) {
                                     let default = default.clone();
                                     match infer::mk_eqty(self.infcx(), false,
-                                                         infer::Misc(default.origin_span),
+                                                         TypeOrigin::Misc(default.origin_span),
                                                          ty, default.ty) {
                                         Ok(()) => {}
                                         Err(_) => {
@@ -1990,7 +1990,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         if let Some(default) = default_map.get(ty) {
                             let default = default.clone();
                             match infer::mk_eqty(self.infcx(), false,
-                                                 infer::Misc(default.origin_span),
+                                                 TypeOrigin::Misc(default.origin_span),
                                                  ty, default.ty) {
                                 Ok(()) => {}
                                 Err(_) => {
@@ -2490,6 +2490,8 @@ fn check_argument_types<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
     // of arguments when we typecheck the functions. This isn't really the
     // right way to do this.
     let xs = [false, true];
+    let mut any_diverges = false; // has any of the arguments diverged?
+    let mut warned = false; // have we already warned about unreachable code?
     for check_blocks in &xs {
         let check_blocks = *check_blocks;
         debug!("check_blocks={}", check_blocks);
@@ -2512,6 +2514,16 @@ fn check_argument_types<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
             supplied_arg_count
         };
         for (i, arg) in args.iter().take(t).enumerate() {
+            if any_diverges && !warned {
+                fcx.ccx
+                    .tcx
+                    .sess
+                    .add_lint(lint::builtin::UNREACHABLE_CODE,
+                              arg.id,
+                              arg.span,
+                              "unreachable expression".to_string());
+                warned = true;
+            }
             let is_block = match arg.node {
                 hir::ExprClosure(..) => true,
                 _ => false
@@ -2542,7 +2554,23 @@ fn check_argument_types<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
                     coerce_ty.map(|ty| demand::suptype(fcx, arg.span, formal_ty, ty));
                 });
             }
+
+            if let Some(&arg_ty) = fcx.inh.tables.borrow().node_types.get(&arg.id) {
+                any_diverges = any_diverges || fcx.infcx().type_var_diverges(arg_ty);
+            }
         }
+        if any_diverges && !warned {
+            let parent = fcx.ccx.tcx.map.get_parent_node(args[0].id);
+            fcx.ccx
+                .tcx
+                .sess
+                .add_lint(lint::builtin::UNREACHABLE_CODE,
+                          parent,
+                          sp,
+                          "unreachable call".to_string());
+            warned = true;
+        }
+
     }
 
     // We also need to make sure we at least write the ty of the other
@@ -2756,7 +2784,7 @@ fn expected_types_for_fn_args<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
                 // return type (likely containing type variables if the function
                 // is polymorphic) and the expected return type.
                 // No argument expectations are produced if unification fails.
-                let origin = infer::Misc(call_span);
+                let origin = TypeOrigin::Misc(call_span);
                 let ures = fcx.infcx().sub_types(false, origin, formal_ret_ty, ret_ty);
                 // FIXME(#15760) can't use try! here, FromError doesn't default
                 // to identity so the resulting type is not constrained.
@@ -2870,14 +2898,14 @@ fn check_expr_with_unifier<'a, 'tcx, F>(fcx: &FnCtxt<'a, 'tcx>,
                 check_expr_with_expectation(fcx, &**else_expr, expected);
                 let else_ty = fcx.expr_ty(&**else_expr);
                 infer::common_supertype(fcx.infcx(),
-                                        infer::IfExpression(sp),
+                                        TypeOrigin::IfExpression(sp),
                                         true,
                                         then_ty,
                                         else_ty)
             }
             None => {
                 infer::common_supertype(fcx.infcx(),
-                                        infer::IfExpressionWithNoElse(sp),
+                                        TypeOrigin::IfExpressionWithNoElse(sp),
                                         false,
                                         then_ty,
                                         fcx.tcx().mk_nil())
@@ -3377,7 +3405,7 @@ fn check_expr_with_unifier<'a, 'tcx, F>(fcx: &FnCtxt<'a, 'tcx>,
             ty::FnConverging(result_type) => {
                 match *expr_opt {
                     None =>
-                        if let Err(_) = fcx.mk_eqty(false, infer::Misc(expr.span),
+                        if let Err(_) = fcx.mk_eqty(false, TypeOrigin::Misc(expr.span),
                                                     result_type, fcx.tcx().mk_nil()) {
                             span_err!(tcx.sess, expr.span, E0069,
                                 "`return;` in a function whose return type is \
@@ -3661,7 +3689,7 @@ fn check_expr_with_unifier<'a, 'tcx, F>(fcx: &FnCtxt<'a, 'tcx>,
               }
               (Some(t_start), Some(t_end)) => {
                   Some(infer::common_supertype(fcx.infcx(),
-                                               infer::RangeExpression(expr.span),
+                                               TypeOrigin::RangeExpression(expr.span),
                                                true,
                                                t_start,
                                                t_end))
@@ -4557,7 +4585,7 @@ pub fn instantiate_path<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
                    impl_scheme.generics.regions.len(subst::TypeSpace));
 
         let impl_ty = fcx.instantiate_type_scheme(span, &substs, &impl_scheme.ty);
-        if fcx.mk_subty(false, infer::Misc(span), self_ty, impl_ty).is_err() {
+        if fcx.mk_subty(false, TypeOrigin::Misc(span), self_ty, impl_ty).is_err() {
             fcx.tcx().sess.span_bug(span,
             &format!(
                 "instantiate_path: (UFCS) {:?} was a subtype of {:?} but now is not?",
