@@ -13,6 +13,7 @@ use self::ImportDirectiveSubclass::*;
 use DefModifiers;
 use Module;
 use Namespace::{self, TypeNS, ValueNS};
+use NsName;
 use NsDef;
 use NameSearchType::ImportSearch;
 use ResolveResult;
@@ -126,13 +127,6 @@ impl ImportResolution {
             id: id,
             target: None,
             is_public: is_public,
-        }
-    }
-
-    pub fn shadowable(&self) -> Shadowable {
-        match self.target {
-            Some(ref target) => target.shadowable,
-            None => Shadowable::Always,
         }
     }
 }
@@ -372,7 +366,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         let used_public = match result {
             Success((mut target, used_reexport)) => {
                 let used_public = target.ns_def.is_public();
-                self.check_for_conflicting_import(&import_resolution, directive.span, name, ns);
+                self.check_for_conflicting_import(&import_resolution, directive, (name, ns));
 
                 // Check that the import is actually importable
                 if !target.ns_def.defined_with(DefModifiers::IMPORTABLE) {
@@ -483,9 +477,8 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
 
                 if let Some(ref target) = target_import_resolution.target {
                     self.check_for_conflicting_import(&dest_import_resolution,
-                                                      import_directive.span,
-                                                      name,
-                                                      ns);
+                                                      import_directive,
+                                                      (name, ns));
                     dest_import_resolution.target = Some(target.clone());
                     dest_import_resolution.is_public = is_public;
                 }
@@ -549,19 +542,18 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                module_: &Module,
                                containing_module: Rc<Module>,
                                import_directive: &ImportDirective,
-                               (name, namespace): (Name, Namespace),
+                               ns_name: NsName,
                                ns_def: NsDef) {
         let id = import_directive.id;
         let is_public = import_directive.is_public;
 
         let mut import_resolutions = module_.import_resolutions.borrow_mut();
-        let dest_import_resolution = import_resolutions.entry((name, namespace))
-                                                       .or_insert_with(|| {
-                                                           ImportResolution::new(id, is_public)
-                                                       });
+        let new_import_resolution = || ImportResolution::new(id, is_public);
+        let dest_import_resolution =
+            import_resolutions.entry(ns_name).or_insert_with(new_import_resolution);
 
         debug!("(resolving glob import) writing resolution `{}` in `{}` to `{}`",
-               name,
+               ns_name.0,
                module_to_string(&*containing_module),
                module_to_string(module_));
 
@@ -569,38 +561,27 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         let modifier = DefModifiers::IMPORTABLE | DefModifiers::PUBLIC;
 
         if ns_def.defined_with(modifier) {
-            debug!("(resolving glob import) ... for {} target", namespace.as_str());
-            if dest_import_resolution.shadowable() == Shadowable::Never {
-                let msg = format!("a {} named `{}` has already been imported in this module",
-                                 namespace.as_str(),
-                                 name);
-               span_err!(self.resolver.session,
-                         import_directive.span,
-                         E0251,
-                         "{}",
-                        msg);
-           } else {
-                let target = Target::new(containing_module.clone(),
-                                         ns_def.clone(),
-                                         import_directive.shadowable);
-                dest_import_resolution.target = Some(target);
-                dest_import_resolution.id = id;
-                dest_import_resolution.is_public = is_public;
-            }
+            debug!("(resolving glob import) ... for {} target", ns_name.1.as_str());
+            self.check_for_conflicting_import(dest_import_resolution, import_directive, ns_name);
+            let target = Target::new(containing_module.clone(),
+                                     ns_def.clone(),
+                                     import_directive.shadowable);
+            dest_import_resolution.target = Some(target);
+            dest_import_resolution.id = id;
+            dest_import_resolution.is_public = is_public;
         }
 
         self.check_for_conflicts_between_imports_and_items(module_,
                                                            dest_import_resolution,
                                                            import_directive.span,
-                                                           (name, namespace));
+                                                           ns_name);
     }
 
     /// Checks that imported names and items don't have the same name.
     fn check_for_conflicting_import(&mut self,
                                     import_resolution: &ImportResolution,
-                                    import_span: Span,
-                                    name: Name,
-                                    namespace: Namespace) {
+                                    directive: &ImportDirective,
+                                    (name, namespace): NsName) {
         let target = import_resolution.target.clone();
         debug!("check_for_conflicting_import: {}; target exists: {}",
                name,
@@ -618,12 +599,15 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                     }
                     ValueNS => "value",
                 };
-                span_err!(self.resolver.session,
-                          import_span,
-                          E0252,
-                          "a {} named `{}` has already been imported in this module",
-                          ns_word,
-                          name);
+                let msg = format!("a {} named `{}` has already been imported in this module",
+                                  ns_word,
+                                  name);
+
+                if let GlobImport = directive.subclass {
+                    span_err!(self.resolver.session, directive.span, E0251, "{}", msg);
+                } else {
+                    span_err!(self.resolver.session, directive.span, E0252, "{}", msg);
+                }
                 let use_id = import_resolution.id;
                 let item = self.resolver.ast_map.expect_item(use_id);
                 // item is syntax::ast::Item;
