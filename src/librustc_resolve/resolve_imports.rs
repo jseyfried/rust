@@ -506,15 +506,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
 
         }
 
-        // Add external module children from the containing module.
-        for (&name, module) in target_module.external_module_children.borrow().iter() {
-            self.merge_import_resolution(module_,
-                                         target_module.clone(),
-                                         import_directive,
-                                         (name, TypeNS),
-                                         NsDef::create_from_module(module.clone(), None));
-        }
-
         // Record the destination of this import
         if let Some(did) = target_module.def_id() {
             self.resolver.def_map.borrow_mut().insert(id,
@@ -626,21 +617,6 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
                                                      import_resolution: &ImportResolution,
                                                      import_span: Span,
                                                      (name, ns): (Name, Namespace)) {
-        // First, check for conflicts between imports and `extern crate`s.
-        if let TypeNS = ns {
-            if module.external_module_children.borrow().contains_key(&name) {
-                match import_resolution.target {
-                    Some(ref target) if target.shadowable != Shadowable::Always => {
-                        let msg = format!("import `{0}` conflicts with imported crate \
-                                           in this module (maybe you meant `use {0}::*`?)",
-                                          name);
-                        span_err!(self.resolver.session, import_span, E0254, "{}", &msg[..]);
-                    }
-                    Some(_) | None => {}
-                }
-            }
-        }
-
         // Check for item conflicts.
         let ns_def = match module.get_child((name, ns)) {
             None => {
@@ -666,6 +642,13 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             }
         } else {
             match import_resolution.target {
+                Some(ref target) if target.shadowable != Shadowable::Always &&
+                                    target.ns_def.defined_with(DefModifiers::EXTERNAL) => {
+                    let msg = format!("import `{0}` conflicts with imported crate \
+                                       in this module (maybe you meant `use {0}::*`?)",
+                                      name);
+                    span_err!(self.resolver.session, import_span, E0254, "{}", &msg[..]);
+                }
                 Some(ref target) if target.shadowable != Shadowable::Always => {
                     let (what, note) = match ns_def.module() {
                         Some(ref module) if module.is_normal() =>

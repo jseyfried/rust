@@ -201,6 +201,10 @@ pub enum ResolutionError<'a> {
     CannotCaptureDynamicEnvironmentInFnItem,
     /// error E0435: attempt to use a non-constant value in a constant
     AttemptToUseNonConstantValueInConstant,
+    /// error E0259: duplicate external crate
+    DuplicateExternalCrates(Name),
+    /// error E0260: item name conflicts with an external crate
+    DuplicateItemAndExternalCrate(Name)
 }
 
 fn resolve_error<'b, 'a: 'b, 'tcx: 'a>(resolver: &'b Resolver<'a, 'tcx>,
@@ -476,6 +480,21 @@ fn resolve_error<'b, 'a: 'b, 'tcx: 'a>(resolver: &'b Resolver<'a, 'tcx>,
                       E0435,
                       "attempt to use a non-constant value in a constant");
         }
+        ResolutionError::DuplicateExternalCrates(name) => {
+            span_err!(resolver.session,
+                      span,
+                      E0259,
+                      "an external crate named `{}` has already been imported into this module",
+                      name);
+        }
+        ResolutionError::DuplicateItemAndExternalCrate(name) => {
+            span_err!(resolver.session,
+                      span,
+                      E0260,
+                      "the name `{}` conflicts with an external crate that has been imported \
+                       into this module",
+                      name);
+        }
     }
 }
 
@@ -744,10 +763,6 @@ pub struct Module {
     children: RefCell<HashMap<NsName, NsDef>>,
     imports: RefCell<Vec<ImportDirective>>,
 
-    // The external module children of this node that were declared with
-    // `extern crate`.
-    external_module_children: RefCell<HashMap<Name, Rc<Module>>>,
-
     // The anonymous children of this node. Anonymous children are pseudo-
     // modules that are implicitly created around items contained within
     // blocks.
@@ -797,7 +812,6 @@ impl Module {
             is_public: is_public,
             children: RefCell::new(HashMap::new()),
             imports: RefCell::new(Vec::new()),
-            external_module_children: RefCell::new(HashMap::new()),
             anonymous_children: RefCell::new(NodeMap()),
             import_resolutions: RefCell::new(HashMap::new()),
             glob_count: Cell::new(0),
@@ -889,6 +903,7 @@ bitflags! {
     flags DefModifiers: u8 {
         const PUBLIC     = 1 << 0,
         const IMPORTABLE = 1 << 1,
+        const EXTERNAL   = 1 << 2,
     }
 }
 
@@ -915,6 +930,12 @@ impl NsDef {
         } | DefModifiers::IMPORTABLE;
 
         NsDef { modifiers: modifiers, def_or_module: DefOrModule::Module(module), span: span }
+    }
+
+    fn create_from_external_module(module: Rc<Module>) -> Self {
+        let mut ns_def = Self::create_from_module(module, None);
+        ns_def.modifiers = ns_def.modifiers | DefModifiers::EXTERNAL;
+        ns_def
     }
 
     fn create_from_def(def: Def, modifiers: DefModifiers, span: Option<Span>) -> Self {
@@ -1125,36 +1146,6 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         }
     }
 
-    /// Checks that the names of external crates don't collide with other
-    /// external crates.
-    fn check_for_conflicts_between_external_crates(&self,
-                                                   module: &Module,
-                                                   name: Name,
-                                                   span: Span) {
-        if module.external_module_children.borrow().contains_key(&name) {
-            span_err!(self.session,
-                      span,
-                      E0259,
-                      "an external crate named `{}` has already been imported into this module",
-                      name);
-        }
-    }
-
-    /// Checks that the names of items don't collide with external crates.
-    fn check_for_conflicts_between_external_crates_and_items(&self,
-                                                             module: &Module,
-                                                             name: Name,
-                                                             span: Span) {
-        if module.external_module_children.borrow().contains_key(&name) {
-            span_err!(self.session,
-                      span,
-                      E0260,
-                      "the name `{}` conflicts with an external crate that has been imported \
-                       into this module",
-                      name);
-        }
-    }
-
     /// Resolves the given module path from the given root `module_`.
     fn resolve_module_path_from_root(&mut self,
                                      module_: Rc<Module>,
@@ -1165,9 +1156,10 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                                      lp: LastPrivate)
                                      -> ResolveResult<(Rc<Module>, LastPrivate)> {
         fn search_parent_externals(needle: Name, module: &Rc<Module>) -> Option<Rc<Module>> {
-            match module.external_module_children.borrow().get(&needle) {
-                Some(_) => Some(module.clone()),
-                None => match module.parent_link {
+            match module.get_child((needle, TypeNS)) {
+                Some(ref ns_def) if ns_def.defined_with(DefModifiers::EXTERNAL) =>
+                    Some(module.clone()),
+                _ => match module.parent_link {
                     ModuleParentLink(ref parent, _) => {
                         search_parent_externals(needle, &parent.upgrade().unwrap())
                     }
@@ -1554,20 +1546,6 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             // in question. We can therecore accurately report that the names are unbound.
             _ => {}
         };
-
-        // If we didn't find a result in the type namespace, search the
-        // external modules.
-        if let TypeNS = ns {
-            let external_module = module.external_module_children.borrow_mut().get(&name).cloned();
-            if let Some(external_module) = external_module {
-                // track the module as used.
-                if let Some(DefId { krate: kid, .. }) = external_module.def_id() {
-                    self.used_crates.insert(kid);
-                }
-                let ns_def = NsDef::create_from_module(external_module, None);
-                return Success((Target::new(module.clone(), ns_def, Shadowable::Never), false));
-            }
-        }
 
         Failed(None)
     }

@@ -109,17 +109,26 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
 
     fn define<T: ToNsDef>(&self, parent: &Rc<Module>, (name, ns): NsName, ns_def: T) {
         let ns_def = ns_def.to_ns_def();
-        let sp = ns_def.span.unwrap_or(DUMMY_SP);
-        self.check_for_conflicts_between_external_crates_and_items(&**parent, name, sp);
 
-        if !parent.try_define_child((name, ns), ns_def) {
+        if !parent.try_define_child((name, ns), ns_def.clone()) {
             // Record an error here by looking up the namespace that had the duplicate
-            let ns_str = match ns { TypeNS => "type or module", ValueNS => "value" };
-            resolve_error(self, sp, ResolutionError::DuplicateDefinition(ns_str, name));
+            let sp = ns_def.span.unwrap_or(DUMMY_SP);
+            let ns_def_prev = parent.get_child((name, ns)).unwrap();
+            match (ns_def.defined_with(DefModifiers::EXTERNAL),
+                   ns_def_prev.defined_with(DefModifiers::EXTERNAL)) {
+                (false, false) => {
+                    let ns_str = match ns { TypeNS => "type or module", ValueNS => "value" };
+                    resolve_error(self, sp, ResolutionError::DuplicateDefinition(ns_str, name));
 
-            if let Some(sp) = parent.children.borrow().get(&(name, ns)).unwrap().span {
-                let note = format!("first definition of {} `{}` here", ns_str, name);
-                self.session.span_note(sp, &note);
+                    if let Some(sp) = parent.children.borrow().get(&(name, ns)).unwrap().span {
+                        let note = format!("first definition of {} `{}` here", ns_str, name);
+                        self.session.span_note(sp, &note);
+                    }
+                }
+                (true, true) =>
+                    resolve_error(self, sp, ResolutionError::DuplicateExternalCrates(name)),
+                (true, false) | (false, true) =>
+                    resolve_error(self, sp, ResolutionError::DuplicateItemAndExternalCrate(name)),
             }
         }
     }
@@ -294,13 +303,11 @@ impl<'a, 'b:'a, 'tcx:'b> GraphBuilder<'a, 'b, 'tcx> {
                     let parent_link = ModuleParentLink(Rc::downgrade(parent), name);
                     let def = DefMod(def_id);
                     let external_module = Module::new(parent_link, Some(def), false, true);
+                    let ns_def = NsDef::create_from_external_module(external_module.clone());
 
                     debug!("(build reduced graph for item) found extern `{}`",
                            module_to_string(&*external_module));
-                    self.check_for_conflicts_between_external_crates(&**parent, name, sp);
-                    parent.external_module_children
-                          .borrow_mut()
-                          .insert(name, external_module.clone());
+                    self.try_define(parent, (name, TypeNS), ns_def);
                     self.build_reduced_graph_for_external_crate(&external_module);
                 }
                 parent.clone()
