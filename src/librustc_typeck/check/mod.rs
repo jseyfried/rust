@@ -2022,6 +2022,22 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             Err(errors) => { report_fulfillment_errors(self.infcx(), &errors); }
         }
     }
+
+    fn private_item_is_visible(&self, def_id: DefId) -> bool {
+        // A private item is visible to everything in its nearest module parent.
+        let visibility = match self.tcx().map.as_local_node_id(def_id) {
+            Some(node_id) => self.tcx().map.get_module_parent(node_id),
+            None => return false,
+        };
+
+        let mut ancestor_module = self.tcx().map.get_module_parent(self.body_id);
+        loop {
+            if ancestor_module == visibility { return true }
+            let ancestor_module_parent = self.tcx().map.get_module_parent(ancestor_module);
+            if ancestor_module == ancestor_module_parent { return false }
+            ancestor_module = ancestor_module_parent;
+        }
+    }
 }
 
 impl<'a, 'tcx> RegionScope for FnCtxt<'a, 'tcx> {

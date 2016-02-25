@@ -945,18 +945,8 @@ impl<'a, 'tcx> PrivacyVisitor<'a, 'tcx> {
         // def map is not. Therefore the names we work out below will not always
         // be accurate and we can get slightly wonky error messages (but type
         // checking is always correct).
-        match path_res.full_def() {
-            Def::Fn(..) => ck("function"),
-            Def::Static(..) => ck("static"),
-            Def::Const(..) => ck("const"),
-            Def::AssociatedConst(..) => ck("associated const"),
-            Def::Variant(..) => ck("variant"),
-            Def::TyAlias(..) => ck("type"),
-            Def::Enum(..) => ck("enum"),
-            Def::Trait(..) => ck("trait"),
-            Def::Struct(..) => ck("struct"),
-            Def::Method(..) => ck("method"),
-            Def::Mod(..) => ck("module"),
+        match path_res.full_def().item_kind_name() {
+            Some(item_kind_name) => ck(item_kind_name),
             _ => {}
         }
     }

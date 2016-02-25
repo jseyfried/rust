@@ -495,6 +495,17 @@ impl<'ast> Map<'ast> {
         }
     }
 
+    /// Returns the NodeId for `id`'s nearest module parent, or `id` itself if it is the crate root.
+    pub fn get_module_parent(&self, id: NodeId) -> NodeId {
+        match self.walk_parent_nodes(id, |node| match *node {
+            NodeItem(&Item { node: Item_::ItemMod(_), .. }) => true,
+            _ => false,
+        }) {
+            Ok(id) => id,
+            Err(id) => id,
+        }
+    }
+
     /// Returns the nearest enclosing scope. A scope is an item or block.
     /// FIXME it is not clear to me that all items qualify as scopes - statics
     /// and associated types probably shouldn't, for example. Behaviour in this

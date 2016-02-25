@@ -152,4 +152,23 @@ impl Def {
             _ => None
         }
     }
+
+    pub fn item_kind_name(&self) -> Option<&'static str> {
+        Some(match *self {
+            Def::Fn(..) => "function",
+            Def::Mod(..) => "module",
+            Def::ForeignMod(..) => "foreign module",
+            Def::Static(..) => "static",
+            Def::Variant(..) => "variant",
+            Def::Enum(..) => "enum",
+            Def::TyAlias(..) => "type",
+            Def::AssociatedTy(..) => "associated type",
+            Def::Struct(..) => "struct",
+            Def::Trait(..) => "trait",
+            Def::Method(..) => "method",
+            Def::Const(..) => "const",
+            Def::AssociatedConst(..) => "associated const",
+            _ => return None,
+        })
+    }
 }
