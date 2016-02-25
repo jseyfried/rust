@@ -934,6 +934,15 @@ impl<'a> ModuleS<'a> {
         }
     }
 
+    fn is_ancestor_of(&self, module: Module<'a>) -> bool {
+        if self.def_id() == module.def_id() { return true }
+        match module.parent_link {
+            ParentLink::BlockParentLink(parent, _) |
+            ParentLink::ModuleParentLink(parent, _) => self.is_ancestor_of(parent),
+            _ => false,
+        }
+    }
+
     pub fn inc_glob_count(&self) {
         self.glob_count.set(self.glob_count.get() + 1);
     }
@@ -1000,7 +1009,23 @@ enum NameBindingKind<'a> {
     Import {
         binding: &'a NameBinding<'a>,
         id: NodeId,
+        // Some(error) if using this imported name causes the import to be a privacy error
+        privacy_error: Option<Box<PrivacyError<'a>>>,
     },
+}
+
+#[derive(Clone, Debug)]
+struct PrivacyError<'a>(Span, Name, &'a NameBinding<'a>);
+impl<'a> std::cmp::Eq for PrivacyError<'a> {}
+impl<'a> std::cmp::PartialEq for PrivacyError<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl<'a> std::hash::Hash for PrivacyError<'a> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
 }
 
 impl<'a> NameBinding<'a> {
@@ -1145,6 +1170,7 @@ pub struct Resolver<'a, 'tcx: 'a> {
     // The intention is that the callback modifies this flag.
     // Once set, the resolver falls out of the walk, preserving the ribs.
     resolved: bool,
+    privacy_errors: HashSet<PrivacyError<'a>>,
 
     arenas: &'a ResolverArenas<'a>,
 }
@@ -1209,6 +1235,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
             callback: None,
             resolved: false,
+            privacy_errors: HashSet::new(),
 
             arenas: arenas,
         }
@@ -1255,12 +1282,15 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             self.used_crates.insert(krate);
         }
 
-        let import_id = match binding.kind {
-            NameBindingKind::Import { id, .. } => id,
+        let (import_id, privacy_error) = match binding.kind {
+            NameBindingKind::Import { id, ref privacy_error, .. } => (id, privacy_error),
             _ => return,
         };
 
         self.used_imports.insert((import_id, ns));
+        if let Some(error) = privacy_error.as_ref() {
+            self.privacy_errors.insert((**error).clone());
+        }
 
         if !self.make_glob_map {
             return;
@@ -1352,6 +1382,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                     // Check to see whether there are type bindings, and, if
                     // so, whether there is a module within.
                     if let Some(module_def) = binding.module() {
+                        self.check_privacy(search_module, name, binding, span);
                         search_module = module_def;
                     } else {
                         let msg = format!("Not a module `{}`", name);
@@ -2911,7 +2942,10 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
         let name = segments.last().unwrap().identifier.name;
         let result = self.resolve_name_in_module(containing_module, name, namespace, false, true);
-        result.success().map(|binding| binding.def().unwrap())
+        result.success().map(|binding| {
+            self.check_privacy(containing_module, name, binding, span);
+            binding.def().unwrap()
+        })
     }
 
     /// Invariant: This must be called only during main resolution, not during
@@ -2958,7 +2992,10 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
         let name = segments.last().unwrap().identifier.name;
         let result = self.resolve_name_in_module(containing_module, name, namespace, false, true);
-        result.success().map(|binding| binding.def().unwrap())
+        result.success().map(|binding| {
+            self.check_privacy(containing_module, name, binding, span);
+            binding.def().unwrap()
+        })
     }
 
     fn resolve_identifier_in_local_ribs(&mut self,
@@ -3570,6 +3607,29 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             }
         }
     }
+
+    fn check_privacy(&mut self,
+                     module: Module<'a>,
+                     name: Name,
+                     binding: &'a NameBinding<'a>,
+                     span: Span) {
+        if !binding.is_public() && !module.is_ancestor_of(self.current_module) {
+            self.privacy_errors.insert(PrivacyError(span, name, binding));
+        }
+    }
+
+    fn report_privacy_errors(&self) {
+        for &PrivacyError(span, name, binding) in self.privacy_errors.iter() {
+            if binding.is_extern_crate() {
+                // Warn when using an inaccessible extern crate.
+                let node_id = binding.module().unwrap().extern_crate_id.unwrap();
+                let msg = format!("extern crate `{}` is private", name);
+                self.session.add_lint(lint::builtin::INACCESSIBLE_EXTERN_CRATE, node_id, span, msg);
+            } else if let Some(item_kind_name) = binding.def().unwrap().item_kind_name() {
+                self.session.span_err(span, &format!("{} `{}` is private", item_kind_name, name));
+            }
+        }
+    }
 }
 
 
@@ -3726,6 +3786,7 @@ pub fn resolve_crate<'a, 'tcx>(session: &'a Session,
     resolver.resolve_crate(krate);
 
     check_unused::check_crate(&mut resolver, krate);
+    resolver.report_privacy_errors();
 
     CrateMap {
         def_map: resolver.def_map,
