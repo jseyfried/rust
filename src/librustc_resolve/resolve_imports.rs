@@ -127,10 +127,18 @@ impl<'a> NameResolution<'a> {
     fn try_define(&mut self, binding: &'a NameBinding<'a>) -> Result<(), &'a NameBinding<'a>> {
         if let Some(old_binding) = self.binding {
             if binding.defined_with(DefModifiers::GLOB_IMPORTED) {
-                self.duplicate_globs.push(binding);
+                if binding.def().unwrap() != old_binding.def().unwrap() {
+                    self.duplicate_globs.push(binding);
+                } else if old_binding.defined_with(DefModifiers::GLOB_IMPORTED) &&
+                          old_binding.is_public() < binding.is_public() {
+                    // We are glob-importing the same item but with greater visibility.
+                    self.binding = Some(binding);
+                }
             } else if old_binding.defined_with(DefModifiers::GLOB_IMPORTED) {
-                self.duplicate_globs.push(old_binding);
                 self.binding = Some(binding);
+                if binding.def().unwrap() != old_binding.def().unwrap() {
+                    self.duplicate_globs.push(old_binding);
+                }
             } else {
                 return Err(old_binding);
             }
@@ -265,13 +273,10 @@ impl<'a> ::ModuleS<'a> {
     {
         let mut resolutions = self.resolutions.borrow_mut();
         let resolution = resolutions.entry((name, ns)).or_insert_with(Default::default);
-        let was_success = resolution.try_result(false).and_then(ResolveResult::success).is_some();
 
         let t = update(resolution);
-        if !was_success {
-            if let Some(Success(binding)) = resolution.try_result(false) {
-                self.define_in_glob_importers(name, ns, binding);
-            }
+        if let Some(Success(binding)) = resolution.try_result(true) {
+            self.define_in_glob_importers(name, ns, binding);
         }
         t
     }
