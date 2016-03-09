@@ -98,9 +98,6 @@ impl ImportDirective {
         if let GlobImport = self.subclass {
             modifiers = modifiers | DefModifiers::GLOB_IMPORTED;
         }
-        if self.is_prelude {
-            modifiers = modifiers | DefModifiers::PRELUDE;
-        }
 
         NameBinding {
             kind: NameBindingKind::Import {
@@ -233,7 +230,8 @@ impl<'a> ::ModuleS<'a> {
             }
         }
 
-        resolution.result(true)
+        self.prelude.borrow().map(|prelude| prelude.resolve_name(name, ns, false))
+                             .unwrap_or(Failed(None))
     }
 
     // Define the name or return the existing binding if there is a collision.
@@ -606,6 +604,11 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
             return Failed(Some((directive.span, msg)));
         }
         build_reduced_graph::populate_module_if_necessary(self.resolver, target_module);
+
+        if directive.is_prelude {
+            *module_.prelude.borrow_mut() = Some(target_module);
+            return Success(());
+        }
 
         // Add to target_module's glob_importers and module_'s resolved_globs
         target_module.glob_importers.borrow_mut().push((module_, directive));

@@ -830,6 +830,7 @@ pub struct ModuleS<'a> {
     // entry block for `f`.
     module_children: RefCell<NodeMap<Module<'a>>>,
 
+    prelude: RefCell<Option<Module<'a>>>,
     shadowed_traits: RefCell<Vec<&'a NameBinding<'a>>>,
 
     glob_importers: RefCell<Vec<(Module<'a>, &'a ImportDirective)>>,
@@ -865,6 +866,7 @@ impl<'a> ModuleS<'a> {
             resolutions: RefCell::new(HashMap::new()),
             unresolved_imports: RefCell::new(Vec::new()),
             module_children: RefCell::new(NodeMap()),
+            prelude: RefCell::new(None),
             shadowed_traits: RefCell::new(Vec::new()),
             glob_importers: RefCell::new(Vec::new()),
             resolved_globs: RefCell::new((Vec::new(), Vec::new())),
@@ -3403,22 +3405,6 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                 None => {} // Nothing to do.
             }
 
-            // Look for trait children.
-            build_reduced_graph::populate_module_if_necessary(self, &search_module);
-
-            search_module.for_each_child(|_, ns, name_binding| {
-                if ns != TypeNS { return }
-                let trait_def_id = match name_binding.def() {
-                    Some(Def::Trait(trait_def_id)) => trait_def_id,
-                    Some(..) | None => return,
-                };
-                if self.trait_item_map.contains_key(&(name, trait_def_id)) {
-                    add_trait_info(&mut found_traits, trait_def_id, name);
-                    let trait_name = self.get_trait_name(trait_def_id);
-                    self.record_use(trait_name, TypeNS, name_binding);
-                }
-            });
-
             // Look for shadowed traits.
             for binding in search_module.shadowed_traits.borrow().iter() {
                 let did = binding.def().unwrap().def_id();
@@ -3429,8 +3415,26 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                 }
             }
 
+            // Look for trait children.
+            let mut search_in_module = |module: Module<'a>| module.for_each_child(|_, ns, binding| {
+                if ns != TypeNS { return }
+                let trait_def_id = match binding.def() {
+                    Some(Def::Trait(trait_def_id)) => trait_def_id,
+                    Some(..) | None => return,
+                };
+                if self.trait_item_map.contains_key(&(name, trait_def_id)) {
+                    add_trait_info(&mut found_traits, trait_def_id, name);
+                    let trait_name = self.get_trait_name(trait_def_id);
+                    self.record_use(trait_name, TypeNS, binding);
+                }
+            });
+            search_in_module(search_module);
+
             match search_module.parent_link {
-                NoParentLink | ModuleParentLink(..) => break,
+                NoParentLink | ModuleParentLink(..) => {
+                    search_module.prelude.borrow().map(search_in_module);
+                    break;
+                }
                 BlockParentLink(parent_module, _) => {
                     search_module = parent_module;
                 }
