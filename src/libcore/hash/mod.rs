@@ -269,7 +269,7 @@ mod impls {
 
     use mem;
     use slice;
-    use super::*;
+    use super::{Hash, Hasher};
 
     macro_rules! impl_write {
         ($(($ty:ident, $meth:ident),)*) => {$(
