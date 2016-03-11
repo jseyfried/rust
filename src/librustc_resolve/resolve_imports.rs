@@ -166,16 +166,15 @@ impl<'a> NameResolution<'a> {
         }
     }
 
-    fn report_conflicts<F: FnMut(&NameBinding, &NameBinding)>(&self, mut report: F) {
+    fn report_conflicts<F: FnMut(&NameBinding, &NameBinding)>(&mut self, mut _report: F) {
         let binding = match self.binding {
             Some(binding) => binding,
             None => return,
         };
 
         if !binding.defined_with(DefModifiers::GLOB_IMPORTED) { return }
-        for duplicate_glob in self.duplicate_globs.iter() {
-            report(duplicate_glob, binding);
-        }
+        if self.duplicate_globs.len() == 0 { return }
+        self.binding = None;
     }
 }
 
@@ -704,7 +703,7 @@ impl<'a, 'b:'a, 'tcx:'b> ImportResolver<'a, 'b, 'tcx> {
         *module.resolved_globs.borrow_mut() = (Vec::new(), Vec::new());
 
         let mut reexports = Vec::new();
-        for (&(name, ns), resolution) in module.resolutions.borrow().iter() {
+        for (&(name, ns), resolution) in module.resolutions.borrow_mut().iter_mut() {
             resolution.report_conflicts(|b1, b2| self.report_conflict(name, ns, b1, b2));
             let binding = match resolution.binding {
                 Some(binding) => binding,
