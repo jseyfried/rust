@@ -696,6 +696,20 @@ enum TypeParameters<'tcx, 'a> {
                       RibKind<'tcx>),
 }
 
+// A lexical scope
+struct LexicalScope<'a> {
+    parent: Option<&'a LexicalScope<'a>>,
+    kind: LexicalScopeKind<'a>,
+}
+
+enum LexicalScopeKind<'a> {
+    Module(Module<'a>), // The items and imports in a module.
+    Generics(Vec<(Name, Def)>),
+    LocalVars(Vec<(Name, Def)>),
+    Item { is_const: bool /* for diagnostics */ },
+    Closure(NodeId),
+}
+
 // The rib kind controls the translation of local
 // definitions (`Def::Local`) to upvars (`Def::Upvar`).
 #[derive(Copy, Clone, Debug)]
@@ -1467,6 +1481,59 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         }
 
         None
+    }
+
+    fn resolve_ident_in_lexical_scope_(&mut self, scope: &'a LexicalScope<'a>,
+                                       ident: hir::Ident, ns: Namespace,
+                                       record_used: bool, span: Span)
+                                       -> Result<LexicalScopeBinding<'a>, bool> {
+        let name = match ns { ValueNS => ident.name, TypeNS => ident.unhygienic_name };
+        let mut passed_closures = Vec::new();
+        let mut passed_item = None;
+        let mut parent_scope = Some(scope);
+
+        loop {
+            let scope = match parent_scope { Some(scope) => scope, None => return Err(false) };
+            parent_scope = scope.parent;
+
+            let bindings = match scope.kind {
+                LexicalScopeKind::Generics(ref bindings) if ns == TypeNS => bindings,
+                LexicalScopeKind::LocalVars(ref bindings) if ns == ValueNS => bindings,
+                LexicalScopeKind::Module(module) => {
+                    let name = ident.unhygienic_name;
+                    match self.resolve_name_in_module(module, name, ns, true, record_used) {
+                        Success(binding) => return Ok(LexicalScopeBinding::Item(binding)),
+                        _ => continue,
+                    }
+                }
+                LexicalScopeKind::Item { is_const } => {
+                    passed_item = Some(is_const);
+                    continue
+                }
+                LexicalScopeKind::Closure(node_id) if ns == ValueNS => {
+                    passed_closures.push(node_id);
+                    continue
+                }
+                _ => continue,
+            };
+
+            let def = match bindings.iter().find(|&&(name_, _)| name_ == name) {
+                Some(&(_, def)) => def,
+                None => continue,
+            };
+
+            // Don't report errors or adjust if the resolution is hypothetical.
+            if !record_used { return Ok(LexicalScopeBinding::LocalDef(LocalDef::from_def(def))); }
+
+            // If we passed through an item, report an illegal capture error.
+            if let Some(is_const) = passed_item {
+                self.report_illegal_capture(def, is_const, span);
+                return Err(true);
+            }
+
+            let adjusted_def = self.adjust_def(def, &passed_closures, span);
+            return Ok(LexicalScopeBinding::LocalDef(LocalDef::from_def(adjusted_def)));
+        }
     }
 
     /// Returns the nearest normal module parent of the given module.
@@ -2649,6 +2716,54 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
         self.resolve_ident_in_lexical_scope(identifier, namespace, record_used)
             .map(LexicalScopeBinding::local_def)
+    }
+
+    fn report_illegal_capture(&mut self, def: Def, in_const: bool, span: Span) {
+        match def {
+            Def::Local(..) if in_const => {
+                let error = ResolutionError::AttemptToUseNonConstantValueInConstant;
+                resolve_error(self, span, error);
+            }
+            Def::Local(..) => {
+                // This was an attempt to access an upvar inside a named function item.
+                // This is not allowed, so we report an error.
+                let error = ResolutionError::CannotCaptureDynamicEnvironmentInFnItem;
+                resolve_error(self, span, error);
+            }
+            Def::TyParam(..) | Def::SelfTy(..) if in_const => {
+                // see #9186
+                resolve_error(self, span, ResolutionError::OuterTypeParameterContext);
+            }
+            Def::TyParam(..) | Def::SelfTy(..) => {
+                // This was an attempt to use a type parameter outside its scope.
+                let error = ResolutionError::TypeParametersFromOuterFunction;
+                resolve_error(self, span, error);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn adjust_def(&mut self, def: Def, passed_closures: &[NodeId], span: Span) -> Def {
+        let node_id = match def {
+            Def::Local(_, node_id) => node_id,
+            _ => return def, // only locals need adjusting
+        };
+
+        let def_id = self.ast_map.local_def_id(node_id);
+        let mut upvar = def;
+        for &closure in passed_closures.iter().rev() {
+            let seen = self.freevars_seen.entry(closure).or_insert_with(NodeMap);
+            if let Some(&index) = seen.get(&node_id) {
+                upvar = Def::Upvar(def_id, node_id, index, closure);
+                continue;
+            }
+            let freevars = self.freevars.entry(closure).or_insert_with(Vec::new);
+            let depth = freevars.len();
+            freevars.push(Freevar { def: upvar, span: span });
+            upvar = Def::Upvar(def_id, node_id, depth, closure);
+            seen.insert(node_id, depth);
+        }
+        upvar
     }
 
     // Resolve a local definition, potentially adjusting for closures.
