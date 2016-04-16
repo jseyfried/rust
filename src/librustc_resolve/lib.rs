@@ -1124,6 +1124,7 @@ struct ResolverArenas<'a> {
     name_bindings: arena::TypedArena<NameBinding<'a>>,
     import_directives: arena::TypedArena<ImportDirective<'a>>,
     name_resolutions: arena::TypedArena<RefCell<NameResolution<'a>>>,
+    lexical_scopes: arena::TypedArena<LexicalScope<'a>>,
 }
 
 impl<'a> ResolverArenas<'a> {
@@ -1146,6 +1147,9 @@ impl<'a> ResolverArenas<'a> {
     }
     fn alloc_name_resolution(&'a self) -> &'a RefCell<NameResolution<'a>> {
         self.name_resolutions.alloc(Default::default())
+    }
+    fn alloc_lexical_scope(&'a self, scope: LexicalScope<'a>) -> &'a LexicalScope<'a> {
+        self.lexical_scopes.alloc(scope)
     }
 }
 
@@ -1219,6 +1223,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             name_bindings: arena::TypedArena::new(),
             import_directives: arena::TypedArena::new(),
             name_resolutions: arena::TypedArena::new(),
+            lexical_scopes: arena::TypedArena::new(),
         }
     }
 
