@@ -703,7 +703,21 @@ struct LexicalScope<'a> {
 }
 
 enum LexicalScopeKind<'a> {
-    Module(Module<'a>), // The items and imports in a module.
+    // The items and imports a normal (`mod`) module or an anonymous module.
+    // Anonymous modules are pseudo-modules that are implicitly created around items
+    // contained within blocks.
+    //
+    // For example, if we have this:
+    //
+    //  fn f() {
+    //      fn g() {
+    //          ...
+    //      }
+    //  }
+    //
+    // There will be an anonymous module created around `g` with the ID of the
+    // entry block for `f`.
+    Module(Module<'a>),
     Generics(Vec<(Name, Def)>),
     LocalVars(Vec<(Name, Def)>),
     Item { is_const: bool /* for diagnostics */ },
@@ -1094,21 +1108,8 @@ pub struct Resolver<'a, 'tcx: 'a> {
     export_map: ExportMap,
     trait_map: TraitMap,
 
-    // A map from nodes to modules, both normal (`mod`) modules and anonymous modules.
-    // Anonymous modules are pseudo-modules that are implicitly created around items
-    // contained within blocks.
-    //
-    // For example, if we have this:
-    //
-    //  fn f() {
-    //      fn g() {
-    //          ...
-    //      }
-    //  }
-    //
-    // There will be an anonymous module created around `g` with the ID of the
-    // entry block for `f`.
-    module_map: NodeMap<Module<'a>>,
+    // A map from nodes to scopes.
+    scope_map: NodeMap<&'a LexicalScope<'a>>,
 
     // Whether or not to print error messages. Can be set to true
     // when getting additional info for error message suggestions,
@@ -1215,7 +1216,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             freevars_seen: NodeMap(),
             export_map: NodeMap(),
             trait_map: NodeMap(),
-            module_map: NodeMap(),
+            scope_map: NodeMap(),
             used_imports: HashSet::new(),
             used_crates: HashSet::new(),
 
@@ -1669,8 +1670,8 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
     fn with_scope<F>(&mut self, id: NodeId, f: F)
         where F: FnOnce(&mut Resolver)
     {
-        let module = self.module_map.get(&id).cloned(); // clones a reference
-        if let Some(module) = module {
+        let scope = self.scope_map.get(&id).cloned(); // clones a reference
+        if let Some(module) = scope.map(LexicalScope::module) {
             // Move down in the graph.
             let orig_module = ::std::mem::replace(&mut self.current_module, module);
             self.value_ribs.push(Rib::new(ModuleRibKind(module)));
@@ -2221,7 +2222,8 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         debug!("(resolving block) entering block");
         // Move down in the graph, if there's an anonymous module rooted here.
         let orig_module = self.current_module;
-        let anonymous_module = self.module_map.get(&block.id).cloned(); // clones a reference
+        let block_scope = self.scope_map.get(&block.id).cloned(); // clones a reference
+        let anonymous_module = block_scope.map(LexicalScope::module);
 
         if let Some(anonymous_module) = anonymous_module {
             debug!("(resolving block) found anonymous module, moving down");

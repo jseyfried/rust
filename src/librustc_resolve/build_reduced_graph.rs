@@ -269,8 +269,8 @@ impl<'b, 'tcx:'b> Resolver<'b, 'tcx> {
                 let def = Def::Mod(self.ast_map.local_def_id(item.id));
                 let module = self.new_module(parent_link, Some(def), false, vis);
                 self.define(parent, name, TypeNS, (module, sp));
-                self.module_map.insert(item.id, module);
                 *scope = self.new_scope(None, LexicalScopeKind::Module(module));
+                self.scope_map.insert(item.id, *scope);
             }
 
             ItemForeignMod(..) => {}
@@ -408,8 +408,8 @@ impl<'b, 'tcx:'b> Resolver<'b, 'tcx> {
 
             let parent_link = BlockParentLink(parent, block_id);
             let new_module = self.new_module(parent_link, None, false, parent.vis);
-            self.module_map.insert(block_id, new_module);
             *scope = self.new_scope(Some(*scope), LexicalScopeKind::Module(new_module));
+            self.scope_map.insert(block_id, *scope);
         }
     }
 
