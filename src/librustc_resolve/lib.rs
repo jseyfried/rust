@@ -710,6 +710,21 @@ enum LexicalScopeKind<'a> {
     Closure(NodeId),
 }
 
+impl<'a> LexicalScope<'a> {
+    fn module(&'a self) -> Module<'a> {
+        let mut ancestor = self;
+        loop {
+            if let LexicalScopeKind::Module(module) = self.kind {
+                return module;
+            }
+            ancestor = match ancestor.parent {
+                Some(parent) => parent,
+                None => panic!("scope has no module ancestor!"),
+            }
+        }
+    }
+}
+
 // The rib kind controls the translation of local
 // definitions (`Def::Local`) to upvars (`Def::Upvar`).
 #[derive(Copy, Clone, Debug)]

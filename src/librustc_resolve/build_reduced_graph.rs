@@ -14,7 +14,7 @@
 //! any imports resolved.
 
 use resolve_imports::ImportDirectiveSubclass::{self, GlobImport};
-use Module;
+use {LexicalScope, LexicalScopeKind, Module};
 use Namespace::{self, TypeNS, ValueNS};
 use {NameBinding, NameBindingKind};
 use ParentLink::{ModuleParentLink, BlockParentLink};
@@ -61,8 +61,12 @@ impl<'a> ToNameBinding<'a> for (Def, Span, ty::Visibility) {
 impl<'b, 'tcx:'b> Resolver<'b, 'tcx> {
     /// Constructs the reduced graph for the entire crate.
     pub fn build_reduced_graph(&mut self, krate: &hir::Crate) {
+        let root_scope = self.arenas.alloc_lexical_scope(LexicalScope {
+            parent: None,
+            kind: LexicalScopeKind::Module(self.graph_root),
+        });
         let mut visitor = BuildReducedGraphVisitor {
-            parent: self.graph_root,
+            parent: root_scope,
             resolver: self,
         };
         intravisit::walk_crate(&mut visitor, krate);
@@ -129,9 +133,14 @@ impl<'b, 'tcx:'b> Resolver<'b, 'tcx> {
         }
     }
 
+    fn new_scope(&mut self, parent: Option<&'b LexicalScope<'b>>, kind: LexicalScopeKind<'b>)
+                 -> &'b LexicalScope<'b> {
+        self.arenas.alloc_lexical_scope(LexicalScope { parent: parent, kind: kind })
+    }
+
     /// Constructs the reduced graph for one item.
-    fn build_reduced_graph_for_item(&mut self, item: &Item, parent_ref: &mut Module<'b>) {
-        let parent = *parent_ref;
+    fn build_reduced_graph_for_item(&mut self, item: &Item, scope: &mut &'b LexicalScope<'b>) {
+        let parent = scope.module();
         let name = item.name;
         let sp = item.span;
         self.current_module = parent;
@@ -261,7 +270,7 @@ impl<'b, 'tcx:'b> Resolver<'b, 'tcx> {
                 let module = self.new_module(parent_link, Some(def), false, vis);
                 self.define(parent, name, TypeNS, (module, sp));
                 self.module_map.insert(item.id, module);
-                *parent_ref = module;
+                *scope = self.new_scope(None, LexicalScopeKind::Module(module));
             }
 
             ItemForeignMod(..) => {}
@@ -388,7 +397,8 @@ impl<'b, 'tcx:'b> Resolver<'b, 'tcx> {
         self.define(parent, name, ValueNS, (def, foreign_item.span, vis));
     }
 
-    fn build_reduced_graph_for_block(&mut self, block: &Block, parent: &mut Module<'b>) {
+    fn build_reduced_graph_for_block(&mut self, block: &Block, scope: &mut &'b LexicalScope<'b>) {
+        let parent = scope.module();
         if self.block_needs_anonymous_module(block) {
             let block_id = block.id;
 
@@ -399,7 +409,7 @@ impl<'b, 'tcx:'b> Resolver<'b, 'tcx> {
             let parent_link = BlockParentLink(parent, block_id);
             let new_module = self.new_module(parent_link, None, false, parent.vis);
             self.module_map.insert(block_id, new_module);
-            *parent = new_module;
+            *scope = self.new_scope(Some(*scope), LexicalScopeKind::Module(new_module));
         }
     }
 
@@ -524,7 +534,7 @@ impl<'b, 'tcx:'b> Resolver<'b, 'tcx> {
 
 struct BuildReducedGraphVisitor<'a, 'b: 'a, 'tcx: 'b> {
     resolver: &'a mut Resolver<'b, 'tcx>,
-    parent: Module<'b>,
+    parent: &'b LexicalScope<'b>,
 }
 
 impl<'a, 'b, 'v, 'tcx> Visitor<'v> for BuildReducedGraphVisitor<'a, 'b, 'tcx> {
@@ -540,7 +550,8 @@ impl<'a, 'b, 'v, 'tcx> Visitor<'v> for BuildReducedGraphVisitor<'a, 'b, 'tcx> {
     }
 
     fn visit_foreign_item(&mut self, foreign_item: &ForeignItem) {
-        self.resolver.build_reduced_graph_for_foreign_item(foreign_item, &self.parent);
+        let parent = self.parent.module();
+        self.resolver.build_reduced_graph_for_foreign_item(foreign_item, parent);
     }
 
     fn visit_block(&mut self, block: &Block) {
