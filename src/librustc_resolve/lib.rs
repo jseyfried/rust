@@ -615,13 +615,7 @@ impl<'a, 'v, 'tcx> Visitor<'v> for Resolver<'a, 'tcx> {
     }
     fn visit_foreign_item(&mut self, foreign_item: &hir::ForeignItem) {
         execute_callback!(hir_map::Node::NodeForeignItem(foreign_item), self);
-        let type_parameters = match foreign_item.node {
-            ForeignItemFn(_, ref generics) => {
-                HasTypeParameters(generics, FnSpace, ItemRibKind)
-            }
-            ForeignItemStatic(..) => NoTypeParameters,
-        };
-        self.with_type_parameter_rib(type_parameters, |this| {
+        self.with_scope_(foreign_item.id, |this| {
             intravisit::walk_foreign_item(this, foreign_item);
         });
     }
@@ -1696,6 +1690,22 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         }
     }
 
+    fn with_scope_<F: FnOnce(&mut Resolver)>(&mut self, id: NodeId, f: F) {
+        let scope = self.scope_map.get(&id).cloned(); // clones a reference
+        if let Some(scope) = scope {
+            let orig_scope = ::std::mem::replace(&mut self.current_scope, scope);
+            let module = scope.module();
+            let orig_module = ::std::mem::replace(&mut self.current_module, module);
+
+            f(self);
+
+            self.current_scope = orig_scope;
+            self.current_module = orig_module;
+        } else {
+            f(self);
+        }
+    }
+
     /// Searches the current set of local scopes for labels.
     /// Stops after meeting a closure.
     fn search_label(&self, name: Name) -> Option<Def> {
@@ -1733,12 +1743,10 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             ItemEnum(_, ref generics) |
             ItemTy(_, ref generics) |
             ItemStruct(_, ref generics) => {
-                self.with_type_parameter_rib(HasTypeParameters(generics, TypeSpace, ItemRibKind),
-                                             |this| intravisit::walk_item(this, item));
+                self.with_scope_(item.id, |this| intravisit::walk_item(this, item));
             }
             ItemFn(_, _, _, _, ref generics, _) => {
-                self.with_type_parameter_rib(HasTypeParameters(generics, FnSpace, ItemRibKind),
-                                             |this| intravisit::walk_item(this, item));
+                self.with_scope_(item.id, |this| intravisit::walk_item(this, item));
             }
 
             ItemDefaultImpl(_, ref trait_ref) => {
@@ -1754,10 +1762,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
             ItemTrait(_, ref generics, ref bounds, ref trait_items) => {
                 // Create a new rib for the trait-wide type parameters.
-                self.with_type_parameter_rib(HasTypeParameters(generics,
-                                                               TypeSpace,
-                                                               ItemRibKind),
-                                             |this| {
+                self.with_scope_(item.id, |this| {
                     let local_def_id = this.ast_map.local_def_id(item.id);
                     this.with_self_rib(Def::SelfTy(Some(local_def_id), None), |this| {
                         this.visit_generics(generics);
@@ -1782,14 +1787,12 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                                         HasTypeParameters(&sig.generics,
                                                           FnSpace,
                                                           MethodRibKind);
-                                    this.with_type_parameter_rib(type_parameters, |this| {
+                                    this.with_scope_(trait_item.id, |this| {
                                         intravisit::walk_trait_item(this, trait_item)
                                     });
                                 }
                                 hir::TypeTraitItem(..) => {
-                                    this.with_type_parameter_rib(NoTypeParameters, |this| {
-                                        intravisit::walk_trait_item(this, trait_item)
-                                    });
+                                    intravisit::walk_trait_item(this, trait_item)
                                 }
                             };
                         }
@@ -2068,10 +2071,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                               item_id: NodeId,
                               impl_items: &[ImplItem]) {
         // If applicable, create a rib for the type parameters.
-        self.with_type_parameter_rib(HasTypeParameters(generics,
-                                                       TypeSpace,
-                                                       ItemRibKind),
-                                     |this| {
+        self.with_scope_(item_id, |this| {
             // Resolve the type parameters.
             this.visit_generics(generics);
 
@@ -2104,11 +2104,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
                                     // We also need a new scope for the method-
                                     // specific type parameters.
-                                    let type_parameters =
-                                        HasTypeParameters(&sig.generics,
-                                                          FnSpace,
-                                                          MethodRibKind);
-                                    this.with_type_parameter_rib(type_parameters, |this| {
+                                    this.with_scope_(impl_item.id, |this| {
                                         intravisit::walk_impl_item(this, impl_item);
                                     });
                                 }
