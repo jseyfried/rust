@@ -1080,6 +1080,8 @@ pub struct Resolver<'a, 'tcx: 'a> {
     // The number of imports that are currently unresolved.
     unresolved_imports: usize,
 
+    current_scope: &'a LexicalScope<'a>,
+
     // The module that represents the current item scope.
     current_module: Module<'a>,
 
@@ -1204,6 +1206,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
             unresolved_imports: 0,
 
+            current_scope: graph_root,
             current_module: graph_root.module(),
             value_ribs: vec![Rib::new(ModuleRibKind(graph_root.module()))],
             type_ribs: vec![Rib::new(ModuleRibKind(graph_root.module()))],
@@ -1507,10 +1510,10 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         None
     }
 
-    fn resolve_ident_in_lexical_scope_(&mut self, scope: &'a LexicalScope<'a>,
-                                       ident: hir::Ident, ns: Namespace,
+    fn resolve_ident_in_lexical_scope_(&mut self, ident: hir::Ident, ns: Namespace,
                                        record_used: bool, span: Span)
                                        -> Result<LexicalScopeBinding<'a>, bool> {
+        let scope = self.current_scope;
         let name = match ns { ValueNS => ident.name, TypeNS => ident.unhygienic_name };
         let mut passed_closures = Vec::new();
         let mut passed_item = None;
@@ -1674,14 +1677,17 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         where F: FnOnce(&mut Resolver)
     {
         let scope = self.scope_map.get(&id).cloned(); // clones a reference
-        if let Some(module) = scope.map(LexicalScope::module) {
+        if let Some(scope) = scope {
             // Move down in the graph.
+            let orig_scope = ::std::mem::replace(&mut self.current_scope, scope);
+            let module = scope.module();
             let orig_module = ::std::mem::replace(&mut self.current_module, module);
             self.value_ribs.push(Rib::new(ModuleRibKind(module)));
             self.type_ribs.push(Rib::new(ModuleRibKind(module)));
 
             f(self);
 
+            self.current_scope = orig_scope;
             self.current_module = orig_module;
             self.value_ribs.pop();
             self.type_ribs.pop();
@@ -1713,6 +1719,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
     fn resolve_crate(&mut self, krate: &hir::Crate) {
         debug!("(resolving crate) starting");
+        self.current_scope = self.graph_root;
         self.current_module = self.graph_root.module();
         intravisit::walk_crate(self, krate);
     }
@@ -2224,14 +2231,16 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
     fn resolve_block(&mut self, block: &Block) {
         debug!("(resolving block) entering block");
         // Move down in the graph, if there's an anonymous module rooted here.
+        let orig_scope = self.current_scope;
         let orig_module = self.current_module;
         let block_scope = self.scope_map.get(&block.id).cloned(); // clones a reference
-        let anonymous_module = block_scope.map(LexicalScope::module);
 
-        if let Some(anonymous_module) = anonymous_module {
+        if let Some(block_scope) = block_scope {
+            let anonymous_module = block_scope.module();
             debug!("(resolving block) found anonymous module, moving down");
             self.value_ribs.push(Rib::new(ModuleRibKind(anonymous_module)));
             self.type_ribs.push(Rib::new(ModuleRibKind(anonymous_module)));
+            self.current_scope = block_scope;
             self.current_module = anonymous_module;
         } else {
             self.value_ribs.push(Rib::new(NormalRibKind));
@@ -2242,9 +2251,10 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
         // Move back up.
         if !self.resolved {
+            self.current_scope = orig_scope;
             self.current_module = orig_module;
             self.value_ribs.pop();
-            if let Some(_) = anonymous_module {
+            if let Some(_) = block_scope {
                 self.type_ribs.pop();
             }
         }
