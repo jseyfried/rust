@@ -26,6 +26,7 @@ use rustc::lint;
 use rustc::hir::def::*;
 use rustc::hir::def_id::{CRATE_DEF_INDEX, DefId};
 use rustc::ty::{self, VariantKind};
+use rustc::ty::subst::{ParamSpace, FnSpace, TypeSpace};
 
 use syntax::ast::{Name, NodeId};
 use syntax::attr::AttrMetaMethods;
@@ -34,7 +35,7 @@ use syntax::codemap::{Span, DUMMY_SP};
 
 use rustc::hir;
 use rustc::hir::{Block, DeclItem};
-use rustc::hir::{ForeignItem, ForeignItemFn, ForeignItemStatic};
+use rustc::hir::{ForeignItem, ForeignItemFn, ForeignItemStatic, Generics};
 use rustc::hir::{Item, ItemConst, ItemEnum, ItemExternCrate, ItemFn};
 use rustc::hir::{ItemForeignMod, ItemImpl, ItemMod, ItemStatic, ItemDefaultImpl};
 use rustc::hir::{ItemStruct, ItemTrait, ItemTy, ItemUse};
@@ -132,6 +133,19 @@ impl<'b, 'tcx:'b> Resolver<'b, 'tcx> {
     fn new_scope(&mut self, parent: Option<&'b LexicalScope<'b>>, kind: LexicalScopeKind<'b>)
                  -> &'b LexicalScope<'b> {
         self.arenas.alloc_lexical_scope(LexicalScope { parent: parent, kind: kind })
+    }
+
+    fn extend_scope_with_generics(&mut self, scope: &mut &'b LexicalScope<'b>,
+                                  id: NodeId, generics: &Generics, space: ParamSpace) {
+        let mut bindings = Vec::new();
+        for (index, param) in generics.ty_params.iter().enumerate() {
+            let name = param.name;
+            let def_id = self.ast_map.local_def_id(param.id);
+            let def = Def::TyParam(space, index as u32, def_id, name);
+            bindings.push((name, def));
+        }
+        *scope = self.new_scope(Some(*scope), LexicalScopeKind::Generics(bindings));
+        self.scope_map.insert(id, *scope);
     }
 
     /// Constructs the reduced graph for one item.
@@ -281,22 +295,25 @@ impl<'b, 'tcx:'b> Resolver<'b, 'tcx> {
                 let def = Def::Const(self.ast_map.local_def_id(item.id));
                 self.define(parent, name, ValueNS, (def, sp, vis));
             }
-            ItemFn(_, _, _, _, _, _) => {
+            ItemFn(_, _, _, _, ref generics, _) => {
                 let def = Def::Fn(self.ast_map.local_def_id(item.id));
                 self.define(parent, name, ValueNS, (def, sp, vis));
+                self.extend_scope_with_generics(scope, item.id, generics, FnSpace);
             }
 
             // These items live in the type namespace.
-            ItemTy(..) => {
+            ItemTy(_, ref generics) => {
                 let def = Def::TyAlias(self.ast_map.local_def_id(item.id));
                 self.define(parent, name, TypeNS, (def, sp, vis));
+                self.extend_scope_with_generics(scope, item.id, generics, TypeSpace);
             }
 
-            ItemEnum(ref enum_definition, _) => {
+            ItemEnum(ref enum_definition, ref generics) => {
                 let parent_link = ModuleParentLink(parent, name);
                 let def = Def::Enum(self.ast_map.local_def_id(item.id));
                 let module = self.new_module(parent_link, Some(def), false, vis);
                 self.define(parent, name, TypeNS, (module, sp));
+                self.extend_scope_with_generics(scope, item.id, generics, TypeSpace);
 
                 for variant in &(*enum_definition).variants {
                     let item_def_id = self.ast_map.local_def_id(item.id);
@@ -305,10 +322,11 @@ impl<'b, 'tcx:'b> Resolver<'b, 'tcx> {
             }
 
             // These items live in both the type and value namespaces.
-            ItemStruct(ref struct_def, _) => {
+            ItemStruct(ref struct_def, ref generics) => {
                 // Define a name in the type namespace.
                 let def = Def::Struct(self.ast_map.local_def_id(item.id));
                 self.define(parent, name, TypeNS, (def, sp, vis));
+                self.extend_scope_with_generics(scope, item.id, generics, TypeSpace);
 
                 // If this is a newtype or unit-like struct, define a name
                 // in the value namespace as well
@@ -326,9 +344,12 @@ impl<'b, 'tcx:'b> Resolver<'b, 'tcx> {
                 self.structs.insert(item_def_id, field_names);
             }
 
-            ItemDefaultImpl(_, _) | ItemImpl(..) => {}
+            ItemDefaultImpl(_, _) => {}
+            ItemImpl(_, _, ref generics, _, _, _) => {
+                self.extend_scope_with_generics(scope, item.id, generics, TypeSpace);
+            }
 
-            ItemTrait(_, _, _, ref items) => {
+            ItemTrait(_, ref generics, _, ref items) => {
                 let def_id = self.ast_map.local_def_id(item.id);
 
                 // Add all the items within to a new module.
@@ -336,6 +357,7 @@ impl<'b, 'tcx:'b> Resolver<'b, 'tcx> {
                 let def = Def::Trait(def_id);
                 let module_parent = self.new_module(parent_link, Some(def), false, vis);
                 self.define(parent, name, TypeNS, (module_parent, sp));
+                self.extend_scope_with_generics(scope, item.id, generics, TypeSpace);
 
                 // Add the names of all the items to the trait info.
                 for item in items {
@@ -554,6 +576,34 @@ impl<'a, 'b, 'v, 'tcx> Visitor<'v> for BuildReducedGraphVisitor<'a, 'b, 'tcx> {
         let old_parent = self.parent;
         self.resolver.build_reduced_graph_for_block(block, &mut self.parent);
         intravisit::walk_block(self, block);
+        self.parent = old_parent;
+    }
+
+    fn visit_trait_item(&mut self, item: &'v hir::TraitItem) {
+        let old_parent = self.parent;
+        match item.node {
+            hir::MethodTraitItem(ref sig, _) => {
+                self.resolver
+                    .extend_scope_with_generics(&mut self.parent, item.id, &sig.generics, FnSpace);
+            }
+            _ => {}
+        }
+
+        intravisit::walk_trait_item(self, item);
+        self.parent = old_parent;
+    }
+
+    fn visit_impl_item(&mut self, item: &'v hir::ImplItem) {
+        let old_parent = self.parent;
+        match item.node {
+            hir::ImplItemKind::Method(ref sig, _) => {
+                self.resolver
+                    .extend_scope_with_generics(&mut self.parent, item.id, &sig.generics, FnSpace);
+            }
+            _ => {}
+        }
+
+        intravisit::walk_impl_item(self, item);
         self.parent = old_parent;
     }
 }

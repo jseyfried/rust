@@ -728,7 +728,7 @@ impl<'a> LexicalScope<'a> {
     fn module(&'a self) -> Module<'a> {
         let mut ancestor = self;
         loop {
-            if let LexicalScopeKind::Module(module) = self.kind {
+            if let LexicalScopeKind::Module(module) = ancestor.kind {
                 return module;
             }
             ancestor = match ancestor.parent {
