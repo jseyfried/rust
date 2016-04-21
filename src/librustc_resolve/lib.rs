@@ -1431,7 +1431,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                         // first component of the path in the current lexical
                         // scope and then proceed to resolve below that.
                         let ident = hir::Ident::from_name(module_path[0]);
-                        match self.resolve_ident_in_lexical_scope(ident, TypeNS, true)
+                        match self.resolve_ident_in_lexical_scope_(ident, TypeNS, true, span).ok()
                                   .and_then(LexicalScopeBinding::module) {
                             None => return Failed(None),
                             Some(containing_module) => {
@@ -2691,7 +2691,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         let last_ident = segments.last().unwrap().identifier;
         // Resolve a single identifier with fallback to primitive types
         let resolve_identifier_with_fallback = |this: &mut Self, record_used| {
-            let def = this.resolve_identifier(last_ident, namespace, record_used);
+            let def = this.resolve_identifier(last_ident, namespace, record_used, span);
             match def {
                 None | Some(LocalDef{def: Def::Mod(..), ..}) if namespace == TypeNS =>
                     this.primitive_type_table
@@ -2739,14 +2739,20 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
     fn resolve_identifier(&mut self,
                           identifier: hir::Ident,
                           namespace: Namespace,
-                          record_used: bool)
+                          record_used: bool,
+                          span: Span)
                           -> Option<LocalDef> {
         if identifier.name == special_idents::invalid.name {
             return Some(LocalDef::from_def(Def::Err));
         }
 
-        self.resolve_ident_in_lexical_scope(identifier, namespace, record_used)
-            .map(LexicalScopeBinding::local_def)
+        if namespace == TypeNS {
+            self.resolve_ident_in_lexical_scope_(identifier, namespace, record_used, span).ok()
+                .map(LexicalScopeBinding::local_def)
+        } else {
+            self.resolve_ident_in_lexical_scope(identifier, namespace, record_used)
+                .map(LexicalScopeBinding::local_def)
+        }
     }
 
     fn report_illegal_capture(&mut self, def: Def, in_const: bool, span: Span) {
