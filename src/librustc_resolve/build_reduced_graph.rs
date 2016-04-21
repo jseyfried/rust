@@ -61,12 +61,8 @@ impl<'a> ToNameBinding<'a> for (Def, Span, ty::Visibility) {
 impl<'b, 'tcx:'b> Resolver<'b, 'tcx> {
     /// Constructs the reduced graph for the entire crate.
     pub fn build_reduced_graph(&mut self, krate: &hir::Crate) {
-        let root_scope = self.arenas.alloc_lexical_scope(LexicalScope {
-            parent: None,
-            kind: LexicalScopeKind::Module(self.graph_root),
-        });
         let mut visitor = BuildReducedGraphVisitor {
-            parent: root_scope,
+            parent: self.graph_root,
             resolver: self,
         };
         intravisit::walk_crate(&mut visitor, krate);

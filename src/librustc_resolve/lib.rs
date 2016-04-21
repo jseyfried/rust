@@ -1071,7 +1071,7 @@ pub struct Resolver<'a, 'tcx: 'a> {
 
     ast_map: &'a hir_map::Map<'tcx>,
 
-    graph_root: Module<'a>,
+    graph_root: &'a LexicalScope<'a>,
 
     trait_item_map: FnvHashMap<(Name, DefId), DefId>,
 
@@ -1183,9 +1183,12 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
            -> Resolver<'a, 'tcx> {
         let root_def_id = ast_map.local_def_id(CRATE_NODE_ID);
         let vis = ty::Visibility::Public;
-        let graph_root =
+        let root_module =
             ModuleS::new(NoParentLink, Some(Def::Mod(root_def_id)), false, vis, arenas);
-        let graph_root = arenas.alloc_module(graph_root);
+        let graph_root = arenas.alloc_lexical_scope(LexicalScope {
+            parent: None,
+            kind: LexicalScopeKind::Module(arenas.alloc_module(root_module)),
+        });
 
         Resolver {
             session: session,
@@ -1201,9 +1204,9 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
             unresolved_imports: 0,
 
-            current_module: graph_root,
-            value_ribs: vec![Rib::new(ModuleRibKind(graph_root))],
-            type_ribs: vec![Rib::new(ModuleRibKind(graph_root))],
+            current_module: graph_root.module(),
+            value_ribs: vec![Rib::new(ModuleRibKind(graph_root.module()))],
+            type_ribs: vec![Rib::new(ModuleRibKind(graph_root.module()))],
             label_ribs: Vec::new(),
 
             current_trait_ref: None,
@@ -1397,7 +1400,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                            span: Span)
                            -> ResolveResult<Module<'a>> {
         if module_path.len() == 0 {
-            return Success(self.graph_root) // Use the crate root
+            return Success(self.graph_root.module()) // Use the crate root
         }
 
         debug!("(resolving module path for import) processing `{}` rooted at `{}`",
@@ -1423,7 +1426,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                     DontUseLexicalScope => {
                         // This is a crate-relative path. We will start the
                         // resolution process at index zero.
-                        search_module = self.graph_root;
+                        search_module = self.graph_root.module();
                         start_index = 0;
                     }
                     UseLexicalScope => {
@@ -1710,7 +1713,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
     fn resolve_crate(&mut self, krate: &hir::Crate) {
         debug!("(resolving crate) starting");
-        self.current_module = self.graph_root;
+        self.current_module = self.graph_root.module();
         intravisit::walk_crate(self, krate);
     }
 
@@ -2933,7 +2936,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                                   .map(|ps| ps.identifier.name)
                                   .collect::<Vec<_>>();
 
-        let root_module = self.graph_root;
+        let root_module = self.graph_root.module();
 
         let containing_module;
         match self.resolve_module_path_from_root(root_module,
@@ -3428,7 +3431,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
         let mut lookup_results = Vec::new();
         let mut worklist = Vec::new();
-        worklist.push((self.graph_root, Vec::new(), false));
+        worklist.push((self.graph_root.module(), Vec::new(), false));
 
         while let Some((in_module,
                         path_segments,
