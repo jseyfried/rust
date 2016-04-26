@@ -2591,7 +2591,13 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         let last_ident = segments.last().unwrap().identifier;
         // Resolve a single identifier with fallback to primitive types
         let resolve_identifier_with_fallback = |this: &mut Self, record_used| {
-            let def = this.resolve_identifier(last_ident, namespace, record_used);
+            let def = if last_ident.unhygienic_name == keywords::Invalid.name() {
+                Some(LocalDef::from_def(Def::Err))
+            } else {
+                this.resolve_ident_in_lexical_scope(last_ident, namespace, record_used)
+                    .map(LexicalScopeBinding::local_def)
+            };
+
             match def {
                 None | Some(LocalDef{def: Def::Mod(..), ..}) if namespace == TypeNS =>
                     this.primitive_type_table
@@ -2633,20 +2639,6 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         }
 
         def.map(mk_res)
-    }
-
-    // Resolve a single identifier
-    fn resolve_identifier(&mut self,
-                          identifier: hir::Ident,
-                          namespace: Namespace,
-                          record_used: bool)
-                          -> Option<LocalDef> {
-        if identifier.unhygienic_name == keywords::Invalid.name() {
-            return Some(LocalDef::from_def(Def::Err));
-        }
-
-        self.resolve_ident_in_lexical_scope(identifier, namespace, record_used)
-            .map(LexicalScopeBinding::local_def)
     }
 
     // Resolve a local definition, potentially adjusting for closures.
