@@ -19,6 +19,7 @@ use attr;
 use attr::{AttrMetaMethods, WithAttrs};
 use codemap;
 use codemap::{Span, Spanned, ExpnInfo, ExpnId, NameAndSpan, MacroBang, MacroAttribute};
+use config::StripUnconfigured;
 use ext::base::*;
 use feature_gate::{self, Features};
 use fold;
@@ -44,9 +45,10 @@ fn check_attributes(attrs: &[ast::Attribute], fld: &MacroExpander) {
     }
 }
 
-pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander) -> P<ast::Expr> {
+pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander, is_optional: bool)
+                   -> Option<P<ast::Expr>> {
     let expr_span = e.span;
-    return e.and_then(|ast::Expr {id, node, span, attrs}| match node {
+    return e.and_then(|ast::Expr {id, node, span, attrs}| Some(match node {
 
         // expr_mac should really be expr_ext or something; it's the
         // entry-point for all syntax extensions.
@@ -61,17 +63,20 @@ pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander) -> P<ast::Expr> {
             let expanded_expr = match expand_mac_invoc(mac, span,
                                                        |r| r.make_expr(),
                                                        mark_expr, fld) {
-                Some(expr) => expr,
+                Some(expr) => match is_optional {
+                    true => fld.strip_unconfigured().fold_opt_expr(expr),
+                    false => Some(fld.strip_unconfigured().fold_expr(expr)),
+                },
                 None => {
-                    return DummyResult::raw_expr(span);
+                    return Some(DummyResult::raw_expr(span));
                 }
             };
 
             // Keep going, outside-in.
-            let fully_expanded = fld.fold_expr(expanded_expr);
+            let fully_expanded = expanded_expr.map(|expr| fld.fold_expr(expr));
             fld.cx.bt_pop();
 
-            fully_expanded
+            return fully_expanded;
         }
 
         ast::ExprKind::InPlace(placer, value_expr) => {
@@ -178,7 +183,7 @@ pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander) -> P<ast::Expr> {
                 attrs: attrs
             }, fld))
         }
-    });
+    }));
 }
 
 /// Expand a (not-ident-style) macro invocation. Returns the result
@@ -487,6 +492,9 @@ pub fn expand_item_mac(it: P<ast::Item>,
             let expn_id = fld.cx.backtrace();
             items.into_iter()
                 .map(|i| mark_item(i, fm, expn_id))
+                .flat_map(|i| fld.strip_unconfigured().fold_item(i))
+                .collect::<SmallVector<_>>()
+                .into_iter()
                 .flat_map(|i| fld.fold_item(i).into_iter())
                 .collect()
         }
@@ -533,6 +541,8 @@ fn expand_stmt(stmt: Stmt, fld: &mut MacroExpander) -> SmallVector<Stmt> {
         Some(stmts) => {
             // Keep going, outside-in.
             let new_items = stmts.into_iter().flat_map(|s| {
+                fld.strip_unconfigured().fold_stmt(s).into_iter()
+            }).collect::<SmallVector<_>>().into_iter().flat_map(|s| {
                 fld.fold_stmt(s).into_iter()
             }).collect();
             fld.cx.bt_pop();
@@ -791,7 +801,7 @@ fn expand_pat(p: P<ast::Pat>, fld: &mut MacroExpander) -> P<ast::Pat> {
                                               mac_span,
                                               &marked_before[..]).make_pat();
                     let expanded = match pat {
-                        Some(e) => e,
+                        Some(e) => fld.strip_unconfigured().fold_pat(e),
                         None => {
                             fld.cx.span_err(
                                 pth.span,
@@ -1089,6 +1099,8 @@ fn expand_impl_item(ii: ast::ImplItem, fld: &mut MacroExpander)
                 Some(impl_items) => {
                     // expand again if necessary
                     let new_items = impl_items.into_iter().flat_map(|ii| {
+                        fld.strip_unconfigured().fold_impl_item(ii)
+                    }).collect::<SmallVector<_>>().into_iter().flat_map(|ii| {
                         expand_impl_item(ii, fld).into_iter()
                     }).collect();
                     fld.cx.bt_pop();
@@ -1143,7 +1155,7 @@ pub fn expand_type(t: P<ast::Ty>, fld: &mut MacroExpander) -> P<ast::Ty> {
                                                          |r| r.make_ty(),
                                                          mark_ty,
                                                          fld) {
-                    Some(ty) => ty,
+                    Some(ty) => fld.strip_unconfigured().fold_ty(ty),
                     None => {
                         return DummyResult::raw_ty(t.span);
                     }
@@ -1184,6 +1196,12 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
     pub fn new(cx: &'a mut ExtCtxt<'b>) -> MacroExpander<'a, 'b> {
         MacroExpander { cx: cx }
     }
+
+    fn strip_unconfigured(&mut self) -> StripUnconfigured {
+        StripUnconfigured::new(&self.cx.cfg,
+                               &self.cx.parse_sess.span_diagnostic,
+                               self.cx.feature_gated_cfgs)
+    }
 }
 
 impl<'a, 'b> Folder for MacroExpander<'a, 'b> {
@@ -1193,7 +1211,11 @@ impl<'a, 'b> Folder for MacroExpander<'a, 'b> {
     }
 
     fn fold_expr(&mut self, expr: P<ast::Expr>) -> P<ast::Expr> {
-        expand_expr(expr, self)
+        expand_expr(expr, self, false).unwrap()
+    }
+
+    fn fold_opt_expr(&mut self, expr: P<ast::Expr>) -> Option<P<ast::Expr>> {
+        expand_expr(expr, self, true)
     }
 
     fn fold_pat(&mut self, pat: P<ast::Pat>) -> P<ast::Pat> {
