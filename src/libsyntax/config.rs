@@ -32,6 +32,16 @@ pub struct StripUnconfigured<'a> {
 }
 
 impl<'a> StripUnconfigured<'a> {
+    pub fn new(config: &'a ast::CrateConfig,
+           diagnostic: &'a Handler,
+           feature_gated_cfgs: &'a mut Vec<GatedCfgAttr>)
+           -> Self {
+        StripUnconfigured {
+            config: config,
+            diag: CfgDiagReal { diag: diagnostic, feature_gated_cfgs: feature_gated_cfgs },
+        }
+    }
+
     // Determine if an item should be translated in the current crate
     // configuration based on the item's attributes
     fn in_cfg(&mut self, attrs: &[ast::Attribute]) -> bool {
@@ -118,13 +128,8 @@ pub fn strip_unconfigured_items(diagnostic: &Handler, krate: ast::Crate,
                                 feature_gated_cfgs: &mut Vec<GatedCfgAttr>)
                                 -> ast::Crate
 {
-    StripUnconfigured {
-        config: &krate.config.clone(),
-        diag: CfgDiagReal {
-            diag: diagnostic,
-            feature_gated_cfgs: feature_gated_cfgs,
-        },
-    }.fold_crate(krate)
+    let config = &krate.config.clone();
+    StripUnconfigured::new(config, diagnostic, feature_gated_cfgs).fold_crate(krate)
 }
 
 impl<T> fold::Folder for T where T: CfgFolder {
