@@ -35,6 +35,53 @@ use std_inject;
 
 use std::collections::HashSet;
 
+trait MacroGenerable: Sized {
+    fn make_with<'a>(result: Box<MacResult + 'a>) -> Option<Self>;
+    fn fold_with<F: Folder>(self, folder: &mut F) -> Self;
+    fn dummy(span: Span) -> Self;
+    fn kind_name() -> &'static str;
+}
+
+macro_rules! impl_macro_generable {
+    ($($ty:ty: $kind_name:expr, .$make:ident, $(.$fold:ident)* $(lift .$fold_elt:ident)*,
+               |$span:ident| $dummy:expr;)*) => { $(
+        impl MacroGenerable for $ty {
+            fn kind_name() -> &'static str { $kind_name }
+            fn make_with<'a>(result: Box<MacResult + 'a>) -> Option<Self> { result.$make() }
+            fn fold_with<F: Folder>(self, folder: &mut F) -> Self {
+                $( folder.$fold(self) )*
+                $( self.into_iter().flat_map(|item| folder. $fold_elt (item)).collect() )*
+            }
+            fn dummy($span: Span) -> Self { $dummy }
+        }
+    )* }
+}
+
+impl_macro_generable! {
+    P<ast::Expr>: "expression", .make_expr, .fold_expr, |span| DummyResult::raw_expr(span);
+    P<ast::Pat>:  "pattern",    .make_pat,  .fold_pat,  |span| P(DummyResult::raw_pat(span));
+    P<ast::Ty>:   "type",       .make_ty,   .fold_ty,   |span| DummyResult::raw_ty(span);
+    SmallVector<ast::ImplItem>:
+        "impl item", .make_impl_items, lift .fold_impl_item, |_span| SmallVector::zero();
+    SmallVector<P<ast::Item>>:
+        "item",      .make_items,      lift .fold_item,      |_span| SmallVector::zero();
+    SmallVector<ast::Stmt>:
+        "statement", .make_stmts,      lift .fold_stmt,      |_span| SmallVector::zero();
+}
+
+impl MacroGenerable for Option<P<ast::Expr>> {
+    fn kind_name() -> &'static str { "expression" }
+    fn dummy(_span: Span) -> Self { None }
+
+    fn make_with<'a>(result: Box<MacResult + 'a>) -> Option<Self> {
+        Some(result.make_expr())
+    }
+
+    fn fold_with<F: Folder>(self, folder: &mut F) -> Self {
+        self.and_then(|expr| folder.fold_opt_expr(expr))
+    }
+}
+
 // this function is called to detect use of feature-gated or invalid attributes
 // on macro invoations since they will not be detected after macro expansion
 fn check_attributes(attrs: &[ast::Attribute], fld: &MacroExpander) {
@@ -60,9 +107,7 @@ pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander, is_optional: bool)
             // Assert that we drop any macro attributes on the floor here
             drop(attrs);
 
-            let expanded_expr = match expand_mac_invoc(mac, span,
-                                                       |r| r.make_expr(),
-                                                       mark_expr, fld) {
+            let expanded_expr = match expand_mac_invoc(mac, span, fld) {
                 Some(expr) => match is_optional {
                     true => fld.strip_unconfigured().fold_opt_expr(expr),
                     false => Some(fld.strip_unconfigured().fold_expr(expr)),
@@ -186,19 +231,9 @@ pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander, is_optional: bool)
     }));
 }
 
-/// Expand a (not-ident-style) macro invocation. Returns the result
-/// of expansion and the mark which must be applied to the result.
-/// Our current interface doesn't allow us to apply the mark to the
-/// result until after calling make_expr, make_items, etc.
-fn expand_mac_invoc<T, F, G>(mac: ast::Mac,
-                             span: codemap::Span,
-                             parse_thunk: F,
-                             mark_thunk: G,
-                             fld: &mut MacroExpander)
-                             -> Option<T> where
-    F: for<'a> FnOnce(Box<MacResult+'a>) -> Option<T>,
-    G: FnOnce(T, Mrk, ExpnId) -> T,
-{
+/// Expand a (not-ident-style) macro invocation. Returns the result of expansion.
+fn expand_mac_invoc<T: MacroGenerable>(mac: ast::Mac, span: Span, fld: &mut MacroExpander)
+                                       -> Option<T> {
     // it would almost certainly be cleaner to pass the whole
     // macro invocation in, rather than pulling it apart and
     // marking the tts and the ctxt separately. This also goes
@@ -249,7 +284,7 @@ fn expand_mac_invoc<T, F, G>(mac: ast::Mac,
                     let expanded = expandfun.expand(fld.cx,
                                                     mac_span,
                                                     &marked_before[..]);
-                    parse_thunk(expanded)
+                    T::make_with(expanded)
                 };
                 let parsed = match opt_parsed {
                     Some(e) => e,
@@ -262,7 +297,7 @@ fn expand_mac_invoc<T, F, G>(mac: ast::Mac,
                         return None;
                     }
                 };
-                Some(mark_thunk(parsed, fm, fld.cx.backtrace()))
+                Some(parsed.fold_with(&mut Marker { mark: fm, expn_id: Some(fld.cx.backtrace()) }))
             }
             _ => {
                 fld.cx.span_err(
@@ -531,11 +566,8 @@ fn expand_stmt(stmt: Stmt, fld: &mut MacroExpander) -> SmallVector<Stmt> {
     // Assert that we drop any macro attributes on the floor here
     drop(attrs);
 
-    let maybe_new_items =
-        expand_mac_invoc(mac.unwrap(), stmt.span,
-                         |r| r.make_stmts(),
-                         |stmts, mark, expn_id| stmts.move_map(|m| mark_stmt(m, mark, expn_id)),
-                         fld);
+    let maybe_new_items: Option<SmallVector<ast::Stmt>> =
+        expand_mac_invoc(mac.unwrap(), stmt.span, fld);
 
     let mut fully_expanded = match maybe_new_items {
         Some(stmts) => {
@@ -769,6 +801,7 @@ fn expand_pat(p: P<ast::Pat>, fld: &mut MacroExpander) -> P<ast::Pat> {
             PatKind::Mac(mac) => (mac.node.path, mac.node.tts),
             _ => unreachable!()
         };
+
         if pth.segments.len() > 1 {
             fld.cx.span_err(pth.span, "expected macro name without module separators");
             return DummyResult::raw_pat(span);
@@ -1089,11 +1122,8 @@ fn expand_impl_item(ii: ast::ImplItem, fld: &mut MacroExpander)
         ast::ImplItemKind::Macro(mac) => {
             check_attributes(&ii.attrs, fld);
 
-            let mark_impl_items = |meths: SmallVector<ast::ImplItem>, mark, expn_id| {
-                meths.move_map(|m| mark_impl_item(m, mark, expn_id))
-            };
-            let maybe_new_items =
-                expand_mac_invoc(mac, ii.span, |r| r.make_impl_items(), mark_impl_items, fld);
+            let maybe_new_items: Option<SmallVector<ast::ImplItem>> =
+                expand_mac_invoc(mac, ii.span, fld);
 
             match maybe_new_items {
                 Some(impl_items) => {
@@ -1151,10 +1181,7 @@ pub fn expand_type(t: P<ast::Ty>, fld: &mut MacroExpander) -> P<ast::Ty> {
     let t = match t.node.clone() {
         ast::TyKind::Mac(mac) => {
             if fld.cx.ecfg.features.unwrap().type_macros {
-                let expanded_ty = match expand_mac_invoc(mac, t.span,
-                                                         |r| r.make_ty(),
-                                                         mark_ty,
-                                                         fld) {
+                let expanded_ty = match expand_mac_invoc(mac, t.span, fld) {
                     Some(ty) => fld.strip_unconfigured().fold_ty(ty),
                     None => {
                         return DummyResult::raw_ty(t.span);
@@ -1413,36 +1440,15 @@ fn mark_tts(tts: &[TokenTree], m: Mrk) -> Vec<TokenTree> {
     noop_fold_tts(tts, &mut Marker{mark:m, expn_id: None})
 }
 
-// apply a given mark to the given expr. Used following the expansion of a macro.
-fn mark_expr(expr: P<ast::Expr>, m: Mrk, expn_id: ExpnId) -> P<ast::Expr> {
-    Marker{mark:m, expn_id: Some(expn_id)}.fold_expr(expr)
-}
-
 // apply a given mark to the given pattern. Used following the expansion of a macro.
 fn mark_pat(pat: P<ast::Pat>, m: Mrk, expn_id: ExpnId) -> P<ast::Pat> {
     Marker{mark:m, expn_id: Some(expn_id)}.fold_pat(pat)
-}
-
-// apply a given mark to the given stmt. Used following the expansion of a macro.
-fn mark_stmt(stmt: ast::Stmt, m: Mrk, expn_id: ExpnId) -> ast::Stmt {
-    Marker{mark:m, expn_id: Some(expn_id)}.fold_stmt(stmt)
-        .expect_one("marking a stmt didn't return exactly one stmt")
 }
 
 // apply a given mark to the given item. Used following the expansion of a macro.
 fn mark_item(expr: P<ast::Item>, m: Mrk, expn_id: ExpnId) -> P<ast::Item> {
     Marker{mark:m, expn_id: Some(expn_id)}.fold_item(expr)
         .expect_one("marking an item didn't return exactly one item")
-}
-
-// apply a given mark to the given item. Used following the expansion of a macro.
-fn mark_impl_item(ii: ast::ImplItem, m: Mrk, expn_id: ExpnId) -> ast::ImplItem {
-    Marker{mark:m, expn_id: Some(expn_id)}.fold_impl_item(ii)
-        .expect_one("marking an impl item didn't return exactly one impl item")
-}
-
-fn mark_ty(ty: P<ast::Ty>, m: Mrk, expn_id: ExpnId) -> P<ast::Ty> {
-    Marker { mark: m, expn_id: Some(expn_id) }.fold_ty(ty)
 }
 
 /// Check that there are no macro invocations left in the AST:
