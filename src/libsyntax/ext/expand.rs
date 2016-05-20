@@ -16,7 +16,7 @@ use ast;
 use ext::mtwt;
 use ext::build::AstBuilder;
 use attr;
-use attr::{AttrMetaMethods, WithAttrs};
+use attr::{AttrMetaMethods, WithAttrs, ThinAttributesExt};
 use codemap;
 use codemap::{Span, Spanned, ExpnInfo, ExpnId, NameAndSpan, MacroBang, MacroAttribute};
 use config::StripUnconfigured;
@@ -100,16 +100,9 @@ pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander, is_optional: bool)
         // expr_mac should really be expr_ext or something; it's the
         // entry-point for all syntax extensions.
         ast::ExprKind::Mac(mac) => {
-            if let Some(ref attrs) = attrs {
-                check_attributes(attrs, fld);
-            }
-
-            // Assert that we drop any macro attributes on the floor here
-            drop(attrs);
-
             match is_optional {
-                true => return expand_mac_invoc(mac, span, fld),
-                false => expand_mac_invoc(mac, span, fld),
+                true => return expand_mac_invoc(mac, attrs.into_attr_vec(), span, fld),
+                false => expand_mac_invoc(mac, attrs.into_attr_vec(), span, fld),
             }
         }
 
@@ -221,7 +214,12 @@ pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander, is_optional: bool)
 }
 
 /// Expand a (not-ident-style) macro invocation. Returns the result of expansion.
-fn expand_mac_invoc<T: MacroGenerable>(mac: ast::Mac, span: Span, fld: &mut MacroExpander) -> T {
+fn expand_mac_invoc<T>(mac: ast::Mac, attrs: Vec<ast::Attribute>, span: Span,
+                       fld: &mut MacroExpander) -> T
+    where T: MacroGenerable,
+{
+    check_attributes(&attrs, fld);
+
     // it would almost certainly be cleaner to pass the whole
     // macro invocation in, rather than pulling it apart and
     // marking the tts and the ctxt separately. This also goes
@@ -551,15 +549,8 @@ fn expand_stmt(stmt: Stmt, fld: &mut MacroExpander) -> SmallVector<Stmt> {
         _ => return expand_non_macro_stmt(stmt, fld)
     };
 
-    if let Some(ref attrs) = attrs {
-        check_attributes(attrs, fld);
-    }
-
-    // Assert that we drop any macro attributes on the floor here
-    drop(attrs);
-
     let mut fully_expanded: SmallVector<ast::Stmt> =
-        expand_mac_invoc(mac.unwrap(), stmt.span, fld);
+        expand_mac_invoc(mac.unwrap(), attrs.into_attr_vec(), stmt.span, fld);
 
     // If this is a macro invocation with a semicolon, then apply that
     // semicolon to the final statement produced by expansion.
@@ -776,7 +767,7 @@ fn expand_pat(p: P<ast::Pat>, fld: &mut MacroExpander) -> P<ast::Pat> {
     }
     p.and_then(|ast::Pat {node, span, ..}| {
         match node {
-            PatKind::Mac(mac) => expand_mac_invoc(mac, span, fld),
+            PatKind::Mac(mac) => expand_mac_invoc(mac, Vec::new(), span, fld),
             _ => unreachable!()
         }
     })
@@ -1031,8 +1022,7 @@ fn expand_impl_item(ii: ast::ImplItem, fld: &mut MacroExpander)
             span: ii.span,
         }),
         ast::ImplItemKind::Macro(mac) => {
-            check_attributes(&ii.attrs, fld);
-            expand_mac_invoc(mac, ii.span, fld)
+            expand_mac_invoc(mac, ii.attrs, ii.span, fld)
         }
         _ => fold::noop_fold_impl_item(ii, fld)
     }
@@ -1076,7 +1066,7 @@ pub fn expand_type(t: P<ast::Ty>, fld: &mut MacroExpander) -> P<ast::Ty> {
     let t = match t.node.clone() {
         ast::TyKind::Mac(mac) => {
             if fld.cx.ecfg.features.unwrap().type_macros {
-                expand_mac_invoc(mac, t.span, fld)
+                expand_mac_invoc(mac, Vec::new(), t.span, fld)
             } else {
                 feature_gate::emit_feature_err(
                     &fld.cx.parse_sess.span_diagnostic,
