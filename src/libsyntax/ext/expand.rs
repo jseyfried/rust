@@ -107,21 +107,10 @@ pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander, is_optional: bool)
             // Assert that we drop any macro attributes on the floor here
             drop(attrs);
 
-            let expanded_expr = match expand_mac_invoc(mac, span, fld) {
-                Some(expr) => match is_optional {
-                    true => fld.strip_unconfigured().fold_opt_expr(expr),
-                    false => Some(fld.strip_unconfigured().fold_expr(expr)),
-                },
-                None => {
-                    return Some(DummyResult::raw_expr(span));
-                }
-            };
-
-            // Keep going, outside-in.
-            let fully_expanded = expanded_expr.map(|expr| fld.fold_expr(expr));
-            fld.cx.bt_pop();
-
-            return fully_expanded;
+            match is_optional {
+                true => return expand_mac_invoc(mac, span, fld),
+                false => expand_mac_invoc(mac, span, fld),
+            }
         }
 
         ast::ExprKind::InPlace(placer, value_expr) => {
@@ -232,8 +221,7 @@ pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander, is_optional: bool)
 }
 
 /// Expand a (not-ident-style) macro invocation. Returns the result of expansion.
-fn expand_mac_invoc<T: MacroGenerable>(mac: ast::Mac, span: Span, fld: &mut MacroExpander)
-                                       -> Option<T> {
+fn expand_mac_invoc<T: MacroGenerable>(mac: ast::Mac, span: Span, fld: &mut MacroExpander) -> T {
     // it would almost certainly be cleaner to pass the whole
     // macro invocation in, rather than pulling it apart and
     // marking the tts and the ctxt separately. This also goes
@@ -246,7 +234,7 @@ fn expand_mac_invoc<T: MacroGenerable>(mac: ast::Mac, span: Span, fld: &mut Macr
                         "expected macro name without module \
                         separators");
         // let compilation continue
-        return None;
+        return T::dummy(span);
     }
     let extname = pth.segments[0].identifier.name;
     match fld.cx.syntax_env.find(extname) {
@@ -259,7 +247,7 @@ fn expand_mac_invoc<T: MacroGenerable>(mac: ast::Mac, span: Span, fld: &mut Macr
             err.emit();
 
             // let compilation continue
-            None
+            T::dummy(span)
         }
         Some(rc) => match *rc {
             NormalTT(ref expandfun, exp_span, allow_internal_unstable) => {
@@ -292,17 +280,23 @@ fn expand_mac_invoc<T: MacroGenerable>(mac: ast::Mac, span: Span, fld: &mut Macr
                         let msg = format!("non-{kind} macro in {kind} position: {name}",
                                           name = extname, kind = T::kind_name());
                         fld.cx.span_err(pth.span, &msg);
-                        return None;
+                        return T::dummy(span);
                     }
                 };
-                Some(parsed.fold_with(&mut Marker { mark: fm, expn_id: Some(fld.cx.backtrace()) }))
+                let configured = parsed.fold_with(&mut fld.strip_unconfigured());
+                let marked = configured.fold_with(&mut Marker {
+                    mark: fm, expn_id: Some(fld.cx.backtrace())
+                });
+                let fully_expanded = marked.fold_with(fld);
+                fld.cx.bt_pop();
+                fully_expanded
             }
             _ => {
                 fld.cx.span_err(
                     pth.span,
                     &format!("'{}' is not a tt-style macro",
                             extname));
-                None
+                T::dummy(span)
             }
         }
     }
@@ -564,22 +558,8 @@ fn expand_stmt(stmt: Stmt, fld: &mut MacroExpander) -> SmallVector<Stmt> {
     // Assert that we drop any macro attributes on the floor here
     drop(attrs);
 
-    let maybe_new_items: Option<SmallVector<ast::Stmt>> =
+    let mut fully_expanded: SmallVector<ast::Stmt> =
         expand_mac_invoc(mac.unwrap(), stmt.span, fld);
-
-    let mut fully_expanded = match maybe_new_items {
-        Some(stmts) => {
-            // Keep going, outside-in.
-            let new_items = stmts.into_iter().flat_map(|s| {
-                fld.strip_unconfigured().fold_stmt(s).into_iter()
-            }).collect::<SmallVector<_>>().into_iter().flat_map(|s| {
-                fld.fold_stmt(s).into_iter()
-            }).collect();
-            fld.cx.bt_pop();
-            new_items
-        }
-        None => SmallVector::zero()
-    };
 
     // If this is a macro invocation with a semicolon, then apply that
     // semicolon to the final statement produced by expansion.
@@ -1119,23 +1099,7 @@ fn expand_impl_item(ii: ast::ImplItem, fld: &mut MacroExpander)
         }),
         ast::ImplItemKind::Macro(mac) => {
             check_attributes(&ii.attrs, fld);
-
-            let maybe_new_items: Option<SmallVector<ast::ImplItem>> =
-                expand_mac_invoc(mac, ii.span, fld);
-
-            match maybe_new_items {
-                Some(impl_items) => {
-                    // expand again if necessary
-                    let new_items = impl_items.into_iter().flat_map(|ii| {
-                        fld.strip_unconfigured().fold_impl_item(ii)
-                    }).collect::<SmallVector<_>>().into_iter().flat_map(|ii| {
-                        expand_impl_item(ii, fld).into_iter()
-                    }).collect();
-                    fld.cx.bt_pop();
-                    new_items
-                }
-                None => SmallVector::zero()
-            }
+            expand_mac_invoc(mac, ii.span, fld)
         }
         _ => fold::noop_fold_impl_item(ii, fld)
     }
@@ -1179,22 +1143,7 @@ pub fn expand_type(t: P<ast::Ty>, fld: &mut MacroExpander) -> P<ast::Ty> {
     let t = match t.node.clone() {
         ast::TyKind::Mac(mac) => {
             if fld.cx.ecfg.features.unwrap().type_macros {
-                let expanded_ty = match expand_mac_invoc(mac, t.span, fld) {
-                    Some(ty) => fld.strip_unconfigured().fold_ty(ty),
-                    None => {
-                        return DummyResult::raw_ty(t.span);
-                    }
-                };
-
-                // Keep going, outside-in.
-                let fully_expanded = fld.fold_ty(expanded_ty);
-                fld.cx.bt_pop();
-
-                fully_expanded.map(|t| ast::Ty {
-                    id: ast::DUMMY_NODE_ID,
-                    node: t.node,
-                    span: t.span,
-                    })
+                expand_mac_invoc(mac, t.span, fld)
             } else {
                 feature_gate::emit_feature_err(
                     &fld.cx.parse_sess.span_diagnostic,
