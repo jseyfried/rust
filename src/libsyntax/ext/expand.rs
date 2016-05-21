@@ -84,7 +84,6 @@ impl MacroGenerable for Option<P<ast::Expr>> {
 
 pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander, is_optional: bool)
                    -> Option<P<ast::Expr>> {
-    let expr_span = e.span;
     return e.and_then(|ast::Expr {id, node, span, attrs}| Some(match node {
 
         // expr_mac should really be expr_ext or something; it's the
@@ -94,21 +93,6 @@ pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander, is_optional: bool)
                 true => return expand_mac_invoc(mac, None, attrs.into_attr_vec(), span, fld),
                 false => expand_mac_invoc(mac, None, attrs.into_attr_vec(), span, fld),
             }
-        }
-
-        ast::ExprKind::InPlace(placer, value_expr) => {
-            // Ensure feature-gate is enabled
-            if !fld.cx.ecfg.features.unwrap().placement_in_syntax {
-                feature_gate::emit_feature_err(
-                    &fld.cx.parse_sess.span_diagnostic, "placement_in_syntax", expr_span,
-                    feature_gate::GateIssue::Language, feature_gate::EXPLAIN_PLACEMENT_IN
-                );
-            }
-
-            let placer = fld.fold_expr(placer);
-            let value_expr = fld.fold_expr(value_expr);
-            fld.cx.expr(span, ast::ExprKind::InPlace(placer, value_expr))
-                .with_attrs(fold_thin_attrs(attrs, fld))
         }
 
         ast::ExprKind::While(cond, body, opt_ident) => {
