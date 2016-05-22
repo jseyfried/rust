@@ -82,17 +82,13 @@ impl MacroGenerable for Option<P<ast::Expr>> {
     }
 }
 
-pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander, is_optional: bool)
-                   -> Option<P<ast::Expr>> {
-    return e.and_then(|ast::Expr {id, node, span, attrs}| Some(match node {
+pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander) -> P<ast::Expr> {
+    return e.and_then(|ast::Expr {id, node, span, attrs}| match node {
 
         // expr_mac should really be expr_ext or something; it's the
         // entry-point for all syntax extensions.
         ast::ExprKind::Mac(mac) => {
-            match is_optional {
-                true => return expand_mac_invoc(mac, None, attrs.into_attr_vec(), span, fld),
-                false => expand_mac_invoc(mac, None, attrs.into_attr_vec(), span, fld),
-            }
+            expand_mac_invoc(mac, None, attrs.into_attr_vec(), span, fld)
         }
 
         ast::ExprKind::While(cond, body, opt_ident) => {
@@ -184,7 +180,7 @@ pub fn expand_expr(e: P<ast::Expr>, fld: &mut MacroExpander, is_optional: bool)
                 attrs: attrs
             }, fld))
         }
-    }));
+    });
 }
 
 /// Expand a macro invocation. Returns the result of expansion.
@@ -1014,11 +1010,20 @@ impl<'a, 'b> Folder for MacroExpander<'a, 'b> {
     }
 
     fn fold_expr(&mut self, expr: P<ast::Expr>) -> P<ast::Expr> {
-        expand_expr(expr, self, false).unwrap()
+        expand_expr(expr, self)
     }
 
     fn fold_opt_expr(&mut self, expr: P<ast::Expr>) -> Option<P<ast::Expr>> {
-        expand_expr(expr, self, true)
+        match expr.node {
+            ast::ExprKind::Mac(_) => {}
+            _ => return Some(expand_expr(expr, self)),
+        }
+
+        expr.and_then(|ast::Expr {node, span, attrs, ..}| match node {
+            ast::ExprKind::Mac(mac) =>
+                expand_mac_invoc(mac, None, attrs.into_attr_vec(), span, self),
+            _ => unreachable!(),
+        })
     }
 
     fn fold_pat(&mut self, pat: P<ast::Pat>) -> P<ast::Pat> {
