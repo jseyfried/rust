@@ -96,36 +96,6 @@ fn expand_derive(cx: &mut ExtCtxt,
             let mut found_partial_eq = false;
             let mut found_eq = false;
 
-            // This span is **very** sensitive and crucial to
-            // getting the stability behavior we want. What we are
-            // doing is marking the generated `#[derive_*]` with the
-            // span of the `#[deriving(...)]` attribute (the
-            // entire attribute, not just the `PartialEq` or `Eq`
-            // part), but with the current backtrace. The current
-            // backtrace will contain a topmost entry that IS this
-            // `#[deriving(...)]` attribute and with the
-            // "allow-unstable" flag set to true.
-            //
-            // Note that we do NOT use the span of the `Eq`
-            // text itself. You might think this is
-            // equivalent, because the `Eq` appears within the
-            // `#[deriving(Eq)]` attribute, and hence we would
-            // inherit the "allows unstable" from the
-            // backtrace.  But in fact this is not always the
-            // case. The actual source text that led to
-            // deriving can be `#[$attr]`, for example, where
-            // `$attr == deriving(Eq)`. In that case, the
-            // "#[derive_*]" would be considered to
-            // originate not from the deriving call but from
-            // text outside the deriving call, and hence would
-            // be forbidden from using unstable
-            // content.
-            //
-            // See tests src/run-pass/rfc1445 for
-            // examples. --nmatsakis
-            let span = Span { expn_id: cx.backtrace(), .. span };
-            assert!(cx.parse_sess.codemap().span_allows_unstable(span));
-
             for titem in traits.iter().rev() {
                 let tname = match titem.node {
                     MetaItemKind::Word(ref tname) => tname,
@@ -151,7 +121,7 @@ fn expand_derive(cx: &mut ExtCtxt,
                 }
 
                 // #[derive(Foo, Bar)] expands to #[derive_Foo] #[derive_Bar]
-                item.attrs.push(cx.attribute(span, cx.meta_word(titem.span,
+                item.attrs.push(cx.attribute(titem.span, cx.meta_word(titem.span,
                     intern_and_get_ident(&format!("derive_{}", tname)))));
             }
 
@@ -160,6 +130,7 @@ fn expand_derive(cx: &mut ExtCtxt,
             if found_partial_eq && found_eq {
                 debug!("inserting structural_match with span {:?}", span);
                 let structural_match = intern_and_get_ident("structural_match");
+                let span = Span { expn_id: cx.backtrace(), ..span };
                 item.attrs.push(cx.attribute(span,
                                              cx.meta_word(span,
                                                           structural_match)));

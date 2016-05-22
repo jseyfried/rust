@@ -846,8 +846,9 @@ fn expand_decorators(a: Annotatable,
                     // we'd ideally decorator_items.push_all(expand_annotatable(ann, fld)),
                     // but that double-mut-borrows fld
                     let mut items: SmallVector<Annotatable> = SmallVector::zero();
+                    let attr_span = Span { expn_id: fld.cx.backtrace(), ..attr.span };
                     dec.expand(fld.cx,
-                               attr.span,
+                               attr_span,
                                &attr.node.value,
                                &a,
                                &mut |ann| items.push(ann));
