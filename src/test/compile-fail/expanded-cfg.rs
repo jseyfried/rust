@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(rustc_attrs)]
+#![feature(custom_attribute)]
 
 macro_rules! mac {
     {} => {
@@ -16,11 +16,21 @@ macro_rules! mac {
         mod m {
             #[lang_item]
             fn f() {}
+
+            #[cfg_attr(target_thread_local, custom)]
+            fn g() {}
+
+            unconfigured_invocation!();
         }
+
+        #[cfg(target_thread_local)] //~ ERROR experimental and subject to change
+        macro_rules! foo { () => {} }
+
+        #[cfg(attr)]
+        macro_rules! foo { () => { compile error } }
+
+        foo!();
     }
 }
 
 mac! {}
-
-#[rustc_error]
-fn main() {} //~ ERROR compilation successful
