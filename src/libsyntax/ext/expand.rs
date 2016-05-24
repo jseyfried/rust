@@ -35,10 +35,18 @@ use std_inject;
 
 use std::collections::HashSet;
 
+// A trait for AST nodes and AST node lists into which macro invocations may expand.
 trait MacroGenerable: Sized {
+    // Expand the given MacResult using its appropriate `make_*` method.
     fn make_with<'a>(result: Box<MacResult + 'a>) -> Option<Self>;
+
+    // Fold this node or list of nodes using the given folder.
     fn fold_with<F: Folder>(self, folder: &mut F) -> Self;
+
+    // Return a placeholder expansion to allow compilation to continue after an erroring expansion.
     fn dummy(span: Span) -> Self;
+
+    // The user-friendly name of the node type (e.g. "expression", "item", etc.) for diagnostics.
     fn kind_name() -> &'static str;
 }
 
