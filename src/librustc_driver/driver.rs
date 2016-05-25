@@ -151,8 +151,6 @@ pub fn compile_input(sess: &Session,
                                                                      &id),
                                 Ok(()));
 
-        let expanded_crate = assign_node_ids(sess, expanded_crate);
-
         // Collect defintions for def ids.
         let mut defs = time(sess.time_passes(),
                             "collecting defs",
@@ -765,7 +763,7 @@ pub fn phase_2_configure_and_expand(sess: &Session,
         println!("Post-expansion node count: {}", count_nodes(&krate));
     }
 
-    Ok(krate)
+    Ok(assign_node_ids(sess, krate))
 }
 
 pub fn assign_node_ids(sess: &Session, krate: ast::Crate) -> ast::Crate {
