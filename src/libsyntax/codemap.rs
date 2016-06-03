@@ -24,6 +24,7 @@ use std::ops::{Add, Sub};
 use std::path::Path;
 use std::rc::Rc;
 use std::cmp;
+use std::i32;
 
 use std::{fmt, fs};
 use std::io::{self, Read};
@@ -454,19 +455,27 @@ pub struct ExpnInfo {
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, Hash, RustcEncodable, RustcDecodable, Copy)]
-pub struct ExpnId(u32);
+pub struct ExpnId(i32);
 
-pub const NO_EXPANSION: ExpnId = ExpnId(!0);
+pub const NO_EXPANSION: ExpnId = ExpnId(i32::MAX);
 // For code appearing from the command line
-pub const COMMAND_LINE_EXPN: ExpnId = ExpnId(!1);
+pub const COMMAND_LINE_EXPN: ExpnId = ExpnId(i32::MAX - 1);
 
 impl ExpnId {
     pub fn from_u32(id: u32) -> ExpnId {
-        ExpnId(id)
+        ExpnId(id as i32)
     }
 
     pub fn into_u32(self) -> u32 {
-        self.0
+        self.0 as u32
+    }
+
+    pub fn toggle_mark(self) -> Self {
+        ExpnId(self.0 ^ i32::MIN)
+    }
+
+    pub fn is_marked(self) -> bool {
+        self.0 < 0
     }
 }
 
@@ -1262,10 +1271,10 @@ impl CodeMap {
         let mut expansions = self.expansions.borrow_mut();
         expansions.push(expn_info);
         let len = expansions.len();
-        if len > u32::max_value() as usize {
+        if len > i32::max_value() as usize {
             panic!("too many ExpnInfo's!");
         }
-        ExpnId(len as u32 - 1)
+        ExpnId(len as i32 - 1)
     }
 
     pub fn with_expn_info<T, F>(&self, id: ExpnId, f: F) -> T where

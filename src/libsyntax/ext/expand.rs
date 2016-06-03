@@ -1198,11 +1198,11 @@ impl Folder for Marker {
         }
     }
 
-    fn new_span(&mut self, mut span: Span) -> Span {
-        if let Some(expn_id) = self.expn_id {
-            span.expn_id = expn_id;
+    fn new_span(&mut self, span: Span) -> Span {
+        match self.expn_id {
+            Some(expn_id) if !span.expn_id.is_marked() => Span { expn_id: expn_id, ..span },
+            _ => Span { expn_id: span.expn_id.toggle_mark(), ..span },
         }
-        span
     }
 }
 
