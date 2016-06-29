@@ -1829,7 +1829,7 @@ impl<'tcx> fmt::Debug for TypeTrace<'tcx> {
 
 impl TypeOrigin {
     pub fn span(&self) -> Span {
-        match *self {
+        let span = match *self {
             TypeOrigin::MethodCompatCheck(span) => span,
             TypeOrigin::ExprAssignable(span) => span,
             TypeOrigin::Misc(span) => span,
@@ -1841,7 +1841,9 @@ impl TypeOrigin {
             TypeOrigin::IfExpressionWithNoElse(span) => span,
             TypeOrigin::RangeExpression(span) => span,
             TypeOrigin::EquatePredicate(span) => span,
-        }
+        };
+        // Prefer call site spans for type errors
+        ty::tls::with(|tcx| tcx.sess.codemap().call_site_span_if_equivalent(span))
     }
 }
 

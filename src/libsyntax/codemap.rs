@@ -502,6 +502,17 @@ impl CodeMap {
         span
     }
 
+    /// If `span` is the span of a macro expansion, return the span of the macro call site.
+    /// Otherwise, return `span`.
+    pub fn call_site_span_if_equivalent(self: &CodeMap, mut span: Span) -> Span {
+        self.with_expn_info(span.expn_id, |info| info.map(|info| {
+            if info.callee.span == Some(span) { // Is `span` an expansion root?
+                span = self.call_site_span_if_equivalent(info.call_site); // note the recursion
+            }
+        }));
+        span
+    }
+
     /// Return the source callee.
     ///
     /// Returns None if the supplied span has no expansion trace,
