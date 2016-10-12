@@ -305,7 +305,11 @@ mod lazy;
 mod util;
 mod stdio;
 
+#[cfg(not(target_os = "none"))]
 const DEFAULT_BUF_SIZE: usize = ::sys_common::io::DEFAULT_BUF_SIZE;
+
+#[cfg(target_os = "none")]
+pub const DEFAULT_BUF_SIZE: usize = 8 * 1024;
 
 // A few methods below (read_to_string, read_line) will append data into a
 // `String` buffer, but we need to be pretty careful when doing this. The

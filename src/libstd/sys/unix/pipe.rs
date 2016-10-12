@@ -9,10 +9,14 @@
 // except according to those terms.
 
 use io;
+#[cfg(not(target_os = "none"))]
 use libc::{self, c_int};
+#[cfg(not(target_os = "none"))]
 use mem;
+#[cfg(not(target_os="none"))]
 use sync::atomic::{AtomicBool, ATOMIC_BOOL_INIT, Ordering};
 use sys::fd::FileDesc;
+#[cfg(not(target_os="none"))]
 use sys::{cvt, cvt_r};
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -21,6 +25,7 @@ use sys::{cvt, cvt_r};
 
 pub struct AnonPipe(FileDesc);
 
+#[cfg(not(target_os="none"))]
 pub fn anon_pipe() -> io::Result<(AnonPipe, AnonPipe)> {
     weak! { fn pipe2(*mut c_int, c_int) -> c_int }
     static INVALID: AtomicBool = ATOMIC_BOOL_INIT;
@@ -83,6 +88,7 @@ impl AnonPipe {
     pub fn into_fd(self) -> FileDesc { self.0 }
 }
 
+#[cfg(not(target_os="none"))]
 pub fn read2(p1: AnonPipe,
              v1: &mut Vec<u8>,
              p2: AnonPipe,
@@ -131,4 +137,12 @@ pub fn read2(p1: AnonPipe,
             return p1.read_to_end(v1).map(|_| ());
         }
     }
+}
+
+#[cfg(target_os="none")]
+pub fn read2(_p1: AnonPipe,
+             _v1: &mut Vec<u8>,
+             _p2: AnonPipe,
+             _v2: &mut Vec<u8>) -> io::Result<()> {
+    Err(::sys::process::generic_error())
 }

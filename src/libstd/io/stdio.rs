@@ -13,7 +13,7 @@ use io::prelude::*;
 use cell::RefCell;
 use fmt;
 use io::lazy::Lazy;
-use io::{self, BufReader, LineWriter};
+use io::{self, BufReader, LineWriter, Write};
 use sync::{Arc, Mutex, MutexGuard};
 use sys::stdio;
 use sys_common::remutex::{ReentrantMutex, ReentrantMutexGuard};

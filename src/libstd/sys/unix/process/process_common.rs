@@ -12,14 +12,27 @@ use os::unix::prelude::*;
 
 use collections::hash_map::{HashMap, Entry};
 use env;
-use ffi::{OsString, OsStr, CString, CStr};
+use ffi::{OsString, OsStr, CString};
+#[cfg(not(target_os = "none"))]
+use ffi::CStr;
 use fmt;
 use io;
-use libc::{self, c_int, gid_t, uid_t, c_char};
+#[cfg(not(target_os = "none"))]
+use libc;
+use libc::{c_int, gid_t, uid_t, c_char};
 use ptr;
 use sys::fd::FileDesc;
-use sys::fs::{File, OpenOptions};
-use sys::pipe::{self, AnonPipe};
+use sys::fs::File;
+#[cfg(not(target_os = "none"))]
+use sys::fs::OpenOptions;
+#[cfg(not(target_os = "none"))]
+use sys::pipe;
+use sys::pipe::AnonPipe;
+
+#[cfg(target_os="none")]
+pub fn generic_error() -> io::Error {
+    io::Error::new(io::ErrorKind::Other, "processes not supported on this platform")
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Command
@@ -69,6 +82,7 @@ pub struct StdioPipes {
 
 // passed to do_exec() with configuration of what the child stdio should look
 // like
+#[cfg_attr(target_os = "none", allow(dead_code))]
 pub struct ChildPipes {
     pub stdin: ChildStdio,
     pub stdout: ChildStdio,
@@ -76,9 +90,9 @@ pub struct ChildPipes {
 }
 
 pub enum ChildStdio {
-    Inherit,
-    Explicit(c_int),
-    Owned(FileDesc),
+    #[cfg(not(target_os="none"))] Inherit,
+    #[cfg(not(target_os="none"))] Explicit(c_int),
+    #[cfg(not(target_os="none"))] Owned(FileDesc),
 }
 
 pub enum Stdio {
@@ -193,12 +207,15 @@ impl Command {
         self.gid = Some(id);
     }
 
+    #[allow(dead_code)]
     pub fn saw_nul(&self) -> bool {
         self.saw_nul
     }
+    #[allow(dead_code)]
     pub fn get_envp(&self) -> &Option<Vec<*const c_char>> {
         &self.envp
     }
+    #[allow(dead_code)]
     pub fn get_argv(&self) -> &Vec<*const c_char> {
         &self.argv
     }
@@ -216,6 +233,7 @@ impl Command {
         self.gid
     }
 
+    #[allow(dead_code)]
     pub fn get_closures(&mut self) -> &mut Vec<Box<FnMut() -> io::Result<()> + Send + Sync>> {
         &mut self.closures
     }
@@ -237,6 +255,7 @@ impl Command {
         self.stderr = Some(stderr);
     }
 
+    #[allow(dead_code)]
     pub fn setup_io(&self, default: Stdio, needs_stdin: bool)
                 -> io::Result<(StdioPipes, ChildPipes)> {
         let null = Stdio::Null;
@@ -269,6 +288,7 @@ fn os2c(s: &OsStr, saw_nul: &mut bool) -> CString {
 }
 
 impl Stdio {
+    #[cfg(not(target_os="none"))]
     pub fn to_child_stdio(&self, readable: bool)
                       -> io::Result<(ChildStdio, Option<AnonPipe>)> {
         match *self {
@@ -313,6 +333,12 @@ impl Stdio {
             }
         }
     }
+
+    #[cfg(target_os="none")]
+    fn to_child_stdio(&self, _readable: bool)
+                      -> io::Result<(ChildStdio, Option<AnonPipe>)> {
+        Err(generic_error())
+    }
 }
 
 impl From<AnonPipe> for Stdio {
@@ -327,6 +353,7 @@ impl From<File> for Stdio {
     }
 }
 
+#[cfg(not(target_os="none"))]
 impl ChildStdio {
     pub fn fd(&self) -> Option<c_int> {
         match *self {
@@ -364,10 +391,12 @@ impl fmt::Debug for Command {
 pub struct ExitStatus(c_int);
 
 impl ExitStatus {
+    #[allow(dead_code)]
     pub fn new(status: c_int) -> ExitStatus {
         ExitStatus(status)
     }
 
+    #[cfg(not(target_os = "none"))]
     fn exited(&self) -> bool {
         unsafe { libc::WIFEXITED(self.0) }
     }
@@ -376,6 +405,7 @@ impl ExitStatus {
         self.code() == Some(0)
     }
 
+    #[cfg(not(target_os="none"))]
     pub fn code(&self) -> Option<i32> {
         if self.exited() {
             Some(unsafe { libc::WEXITSTATUS(self.0) })
@@ -384,12 +414,23 @@ impl ExitStatus {
         }
     }
 
+    #[cfg(target_os="none")]
+    pub fn code(&self) -> Option<i32> {
+        None
+    }
+
+    #[cfg(not(target_os="none"))]
     pub fn signal(&self) -> Option<i32> {
         if !self.exited() {
             Some(unsafe { libc::WTERMSIG(self.0) })
         } else {
             None
         }
+    }
+
+    #[cfg(target_os="none")]
+    pub fn signal(&self) -> Option<i32> {
+        None
     }
 }
 

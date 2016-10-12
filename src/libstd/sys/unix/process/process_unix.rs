@@ -8,11 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(unused)]
+
 use io::{self, Error, ErrorKind};
 use libc::{self, c_int, gid_t, pid_t, uid_t};
 use mem;
 use ptr;
 
+#[cfg(not(target_os = "none"))]
 use sys::cvt;
 use sys::process::process_common::*;
 
@@ -21,6 +24,7 @@ use sys::process::process_common::*;
 ////////////////////////////////////////////////////////////////////////////////
 
 impl Command {
+    #[cfg(not(target_os = "none"))]
     pub fn spawn(&mut self, default: Stdio, needs_stdin: bool)
                  -> io::Result<(Process, StdioPipes)> {
         use sys;
@@ -99,6 +103,13 @@ impl Command {
         }
     }
 
+    #[cfg(target_os = "none")]
+    pub fn spawn(&mut self, _default: Stdio, _needs_stdin: bool)
+                 -> io::Result<(Process, StdioPipes)> {
+        Err(generic_error())
+    }
+
+    #[cfg(not(target_os = "none"))]
     pub fn exec(&mut self, default: Stdio) -> io::Error {
         if self.saw_nul() {
             return io::Error::new(ErrorKind::InvalidInput,
@@ -109,6 +120,11 @@ impl Command {
             Ok((_, theirs)) => unsafe { self.do_exec(theirs) },
             Err(e) => e,
         }
+    }
+
+    #[cfg(target_os = "none")]
+    pub fn exec(&mut self, default: Stdio) -> io::Error {
+        unimplemented!()
     }
 
     // And at this point we've reached a special time in the life of the
@@ -141,6 +157,7 @@ impl Command {
     // allocation). Instead we just close it manually. This will never
     // have the drop glue anyway because this code never returns (the
     // child will either exec() or invoke libc::exit)
+    #[cfg(not(target_os = "none"))]
     unsafe fn do_exec(&mut self, stdio: ChildPipes) -> io::Error {
         use sys::{self, cvt_r};
 
@@ -227,7 +244,7 @@ impl Command {
 /// The unique id of the process (this should never be negative).
 pub struct Process {
     pid: pid_t,
-    status: Option<ExitStatus>,
+    #[cfg(not(target_os = "none"))] status: Option<ExitStatus>,
 }
 
 impl Process {
@@ -235,6 +252,7 @@ impl Process {
         self.pid as u32
     }
 
+    #[cfg(not(target_os = "none"))]
     pub fn kill(&mut self) -> io::Result<()> {
         // If we've already waited on this process then the pid can be recycled
         // and used for another process, and we probably shouldn't be killing
@@ -247,6 +265,12 @@ impl Process {
         }
     }
 
+    #[cfg(target_os = "none")]
+    pub fn kill(&mut self) -> io::Result<()> {
+        Err(generic_error())
+    }
+
+    #[cfg(not(target_os = "none"))]
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
         use sys::cvt_r;
         if let Some(status) = self.status {
@@ -258,6 +282,12 @@ impl Process {
         Ok(ExitStatus::new(status))
     }
 
+    #[cfg(target_os = "none")]
+    pub fn wait(&mut self) -> io::Result<ExitStatus> {
+        Err(generic_error())
+    }
+
+    #[cfg(not(target_os = "none"))]
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         if let Some(status) = self.status {
             return Ok(Some(status))
@@ -272,5 +302,10 @@ impl Process {
             self.status = Some(ExitStatus::new(status));
             Ok(Some(ExitStatus::new(status)))
         }
+    }
+
+    #[cfg(target_os = "none")]
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        Err(generic_error())
     }
 }

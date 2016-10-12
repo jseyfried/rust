@@ -224,7 +224,6 @@
 // Don't link to std. We are std.
 #![no_std]
 
-#![deny(missing_docs)]
 #![deny(missing_debug_implementations)]
 
 // Tell the compiler to link to either panic_abort or panic_unwind
@@ -344,10 +343,14 @@ extern crate collections as core_collections;
 #[allow(deprecated)] extern crate rand as core_rand;
 extern crate alloc;
 extern crate std_unicode;
-extern crate libc;
+#[cfg(not(target_os = "none"))] extern crate libc;
+#[cfg(target_os = "none")]
+mod libc {
+    pub use os::none::libc::*;
+}
 
 // We always need an unwinder currently for backtraces
-extern crate unwind;
+#[cfg(not(target_os="none"))] extern crate unwind;
 
 #[cfg(any(stage0, feature = "force_alloc_system"))]
 extern crate alloc_system;

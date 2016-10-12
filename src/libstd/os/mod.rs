@@ -34,5 +34,6 @@ pub use sys::ext as windows;
 #[cfg(target_os = "solaris")]   pub mod solaris;
 #[cfg(target_os = "emscripten")] pub mod emscripten;
 #[cfg(target_os = "fuchsia")]    pub mod fuchsia;
+#[cfg(target_os = "none")]      pub mod none;
 
 pub mod raw;

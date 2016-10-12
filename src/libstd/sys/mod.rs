@@ -34,8 +34,12 @@
 
 pub use self::imp::*;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "none")))]
 #[path = "unix/mod.rs"]
+mod imp;
+
+#[cfg(target_os = "none")]
+#[path = "none/mod.rs"]
 mod imp;
 
 #[cfg(windows)]
@@ -45,3 +49,4 @@ mod imp;
 #[cfg(target_os = "redox")]
 #[path = "redox/mod.rs"]
 mod imp;
+
