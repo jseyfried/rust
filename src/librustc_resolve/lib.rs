@@ -1580,6 +1580,13 @@ impl<'a> Resolver<'a> {
     /// grammar: (SELF MOD_SEP ) ? (SUPER MOD_SEP) *
     fn resolve_module_prefix(&mut self, module_path: &[Ident], span: Option<Span>)
                              -> ResolveResult<ModulePrefixResult<'a>> {
+        if &*module_path[0].name.as_str() == "$crate" {
+            let module = self.invocations[&module_path[0].ctxt.source().1].module.get();
+            let crate_root =
+                if module.def_id().unwrap().is_local() { self.graph_root } else { module };
+            return Success(PrefixFound(crate_root, 1))
+        }
+
         // Start at the current module if we see `self` or `super`, or at the
         // top of the crate otherwise.
         let mut i = match &*module_path[0].name.as_str() {

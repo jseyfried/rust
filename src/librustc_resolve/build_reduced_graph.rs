@@ -37,6 +37,7 @@ use syntax::ast::{self, Block, ForeignItem, ForeignItemKind, Item, ItemKind};
 use syntax::ast::{Mutability, StmtKind, TraitItem, TraitItemKind};
 use syntax::ast::{Variant, ViewPathGlob, ViewPathList, ViewPathSimple};
 use syntax::ext::base::{MultiItemModifier, Resolver as SyntaxResolver};
+use syntax::ext::expand::mark_tts;
 use syntax::ext::hygiene::Mark;
 use syntax::feature_gate::{self, emit_feature_err};
 use syntax::ext::tt::macro_rules;
@@ -195,11 +196,16 @@ impl<'b> Resolver<'b> {
                 // We need to error on `#[macro_use] extern crate` when it isn't at the
                 // crate root, because `$crate` won't work properly.
                 let is_crate_root = self.current_module.parent.is_none();
+                // The mark of the expansion that generates the loaded macros.
+                let mut opt_mark = None;
                 for loaded_macro in self.crate_loader.load_macros(item, is_crate_root) {
+                    let mark = opt_mark.unwrap_or_else(Mark::fresh);
+                    opt_mark = Some(mark);
                     match loaded_macro.kind {
                         LoadedMacroKind::Def(mut def) => {
                             let name = def.ident.name;
                             if def.use_locally {
+                                def.body = mark_tts(&def.body, mark);
                                 let ext =
                                     Rc::new(macro_rules::compile(&self.session.parse_sess, &def));
                                 if self.builtin_macros.insert(name, ext).is_some() &&
@@ -236,6 +242,17 @@ impl<'b> Resolver<'b> {
                         ..ModuleS::new(Some(parent), ModuleKind::Def(Def::Mod(def_id), name))
                     });
                     self.define(parent, name, TypeNS, (module, sp, vis));
+
+                    if let Some(mark) = opt_mark {
+                        let invocation = self.arenas.alloc_invocation_data(InvocationData {
+                            module: Cell::new(module),
+                            def_index: CRATE_DEF_INDEX,
+                            const_integer: false,
+                            legacy_scope: Cell::new(LegacyScope::Empty),
+                            expansion: Cell::new(LegacyScope::Empty),
+                        });
+                        self.invocations.insert(mark, invocation);
+                    }
 
                     self.populate_module_if_necessary(module);
                 }
