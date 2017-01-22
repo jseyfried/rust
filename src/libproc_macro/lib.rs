@@ -30,18 +30,20 @@
 #![deny(warnings)]
 #![deny(missing_docs)]
 
+#![feature(conservative_impl_trait)]
 #![feature(rustc_private)]
 #![feature(staged_api)]
 #![feature(lang_items)]
 
 extern crate syntax;
+extern crate syntax_pos;
 
 use std::fmt;
 use std::str::FromStr;
 
 use syntax::errors::DiagnosticBuilder;
 use syntax::parse;
-use syntax::tokenstream::TokenStream as TokenStream_;
+use syntax::tokenstream;
 
 /// The main type provided by this crate, representing an abstract stream of
 /// tokens.
@@ -53,9 +55,7 @@ use syntax::tokenstream::TokenStream as TokenStream_;
 /// The API of this type is intentionally bare-bones, but it'll be expanded over
 /// time!
 #[stable(feature = "proc_macro_lib", since = "1.15.0")]
-pub struct TokenStream {
-    inner: TokenStream_,
-}
+pub struct TokenStream(tokenstream::TokenStream);
 
 /// Error returned from `TokenStream::from_str`.
 #[derive(Debug)]
@@ -82,26 +82,22 @@ pub mod __internal {
     use syntax::ast;
     use syntax::ptr::P;
     use syntax::parse::{self, token, ParseSess};
-    use syntax::tokenstream::{TokenTree, TokenStream as TokenStream_};
+    use syntax::tokenstream;
 
     use super::{TokenStream, LexError};
 
     pub fn new_token_stream(item: P<ast::Item>) -> TokenStream {
-        TokenStream {
-            inner: TokenTree::Token(item.span, token::Interpolated(Rc::new(token::NtItem(item))))
-                .into()
-        }
+        let (span, token) = (item.span, token::Interpolated(Rc::new(token::NtItem(item))));
+        TokenStream(tokenstream::TokenTree::Token(span, token).into())
     }
 
-    pub fn token_stream_wrap(inner: TokenStream_) -> TokenStream {
-        TokenStream {
-            inner: inner
-        }
+    pub fn token_stream_wrap(inner: tokenstream::TokenStream) -> TokenStream {
+        TokenStream(inner)
     }
 
     pub fn token_stream_parse_items(stream: TokenStream) -> Result<Vec<P<ast::Item>>, LexError> {
         with_parse_sess(move |sess| {
-            let mut parser = parse::new_parser_from_ts(sess, stream.inner);
+            let mut parser = parse::new_parser_from_ts(sess, token_stream_inner(stream));
             let mut items = Vec::new();
 
             while let Some(item) = try!(parser.parse_item().map_err(super::parse_to_lex_err)) {
@@ -112,8 +108,8 @@ pub mod __internal {
         })
     }
 
-    pub fn token_stream_inner(stream: TokenStream) -> TokenStream_ {
-        stream.inner
+    pub fn token_stream_inner(stream: TokenStream) -> tokenstream::TokenStream {
+        stream.0
     }
 
     pub trait Registry {
@@ -184,6 +180,51 @@ impl FromStr for TokenStream {
 #[stable(feature = "proc_macro_lib", since = "1.15.0")]
 impl fmt::Display for TokenStream {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.inner.fmt(f)
+        self.0.fmt(f)
     }
 }
+
+impl TokenStream {
+    /// Returns an empty `TokenStream`.
+    #[unstable(feature = "proc_macro_lib", issue = "38356")]
+    pub fn empty() -> TokenStream {
+        TokenStream(tokenstream::TokenStream::empty())
+    }
+
+    /// Checks if this `TokenStream` is empty.
+    #[unstable(feature = "proc_macro_lib", issue = "38356")]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Returns an iterator over the `TokenTree`s in this `TokenStream`.
+    #[unstable(feature = "proc_macro_lib", issue = "38356")]
+    pub fn trees(self) -> impl Iterator<Item = TokenTree> {
+        Vec::new().into_iter() // TODO
+    }
+}
+
+/// A single token or a delimited sequence of tokens (e.g. `[1, (), ..]`).
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+pub struct TokenTree {
+    /// Classification of the `TokenTree`
+    pub kind: TokenKind,
+    /// The `TokenTree`'s span.
+    pub span: Span,
+    /// The expansions that generated this `TokenTree`.
+    pub hygiene: Hygiene,
+}
+
+/// Classification of a `TokenTree`
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+pub struct TokenKind {
+    // TODO
+}
+
+/// A region of source code used for error reporting.
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+pub struct Span(syntax_pos::Span);
+
+/// This describes the macro expansions from which a `TokenTree` originates.
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+pub struct Hygiene(syntax::ext::hygiene::SyntaxContext);

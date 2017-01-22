@@ -202,6 +202,7 @@ name = "proc_macro"
 version = "0.0.0"
 dependencies = [
  "syntax 0.0.0",
+ "syntax_pos 0.0.0",
 ]
 
 [[package]]
