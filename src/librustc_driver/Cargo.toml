@@ -12,7 +12,6 @@ crate-type = ["dylib"]
 arena = { path = "../libarena" }
 graphviz = { path = "../libgraphviz" }
 log = { path = "../liblog" }
-proc_macro_plugin = { path = "../libproc_macro_plugin" }
 rustc = { path = "../librustc" }
 rustc_back = { path = "../librustc_back" }
 rustc_borrowck = { path = "../librustc_borrowck" }

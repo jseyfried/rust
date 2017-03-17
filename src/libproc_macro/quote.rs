@@ -12,15 +12,21 @@
 //! This file contains the implementation internals of the quasiquoter provided by `qquote!`.
 
 use syntax::ast::Ident;
+use syntax::ext::base::{ExtCtxt, ProcMacro};
 use syntax::parse::token::{self, Token, Lit};
 use syntax::symbol::Symbol;
-use syntax::tokenstream::{self, Delimited, TokenTree, TokenStream};
-use syntax_pos::DUMMY_SP;
+use syntax::tokenstream::{Delimited, TokenTree, TokenStream};
+use syntax_pos::{Span, DUMMY_SP};
 
-use std::iter;
+pub struct Quoter;
 
-pub fn quote<'cx>(stream: TokenStream) -> TokenStream {
-    stream.quote()
+pub mod __rt {
+    pub use syntax::ast::Ident;
+    pub use syntax::parse::token;
+    pub use syntax::symbol::Symbol;
+    pub use syntax::tokenstream::{TokenStream, TokenTree, Delimited};
+    pub use syntax_pos::DUMMY_SP;
+    pub use __internal::{token_stream_inner, token_stream_wrap};
 }
 
 trait Quote {
@@ -45,6 +51,7 @@ macro_rules! quote_tree {
     (($($t:tt)*)) => { delimit(token::Paren, quote!($($t)*)) };
     ([$($t:tt)*]) => { delimit(token::Bracket, quote!($($t)*)) };
     ({$($t:tt)*}) => { delimit(token::Brace, quote!($($t)*)) };
+    (rt) => { quote!(::proc_macro::__internal::__rt) };
     ($t:tt) => { TokenStream::from(TokenTree::Token(DUMMY_SP, quote_tok!($t))) };
 }
 
@@ -55,6 +62,15 @@ fn delimit(delim: token::DelimToken, stream: TokenStream) -> TokenStream {
 macro_rules! quote {
     () => { TokenStream::empty() };
     ($($t:tt)*) => { [ $( quote_tree!($t), )* ].iter().cloned().collect::<TokenStream>() };
+}
+
+impl ProcMacro for Quoter {
+    fn expand<'cx>(&self, cx: &'cx mut ExtCtxt, _: Span, stream: TokenStream) -> TokenStream {
+        let mut info = cx.current_expansion.mark.expn_info().unwrap();
+        info.callee.allow_internal_unstable = true;
+        cx.current_expansion.mark.set_expn_info(info);
+        quote!(rt::token_stream_wrap((quote stream)))
+    }
 }
 
 impl<T: Quote> Quote for Option<T> {
@@ -68,37 +84,38 @@ impl<T: Quote> Quote for Option<T> {
 
 impl Quote for TokenStream {
     fn quote(&self) -> TokenStream {
-        if self.is_empty() {
-            return quote!(::syntax::tokenstream::TokenStream::empty());
-        }
+        let mut builder = TokenStream::builder();
+        builder.push(quote!(rt::TokenStream::builder()));
 
-        struct Quoter(iter::Peekable<tokenstream::Cursor>);
-
-        impl Iterator for Quoter {
-            type Item = TokenStream;
-
-            fn next(&mut self) -> Option<TokenStream> {
-                let quoted_tree = if let Some(&TokenTree::Token(_, Token::Dollar)) = self.0.peek() {
-                    self.0.next();
-                    match self.0.next() {
-                        Some(tree @ TokenTree::Token(_, Token::Ident(..))) => Some(tree.into()),
-                        Some(tree @ TokenTree::Token(_, Token::Dollar)) => Some(tree.quote()),
-                        // FIXME(jseyfried): improve these diagnostics
-                        Some(..) => panic!("`$` must be followed by an ident or `$` in `quote!`"),
-                        None => panic!("unexpected trailing `$` in `quote!`"),
-                    }
-                } else {
-                    self.0.next().as_ref().map(Quote::quote)
+        let mut trees = self.trees();
+        loop {
+            let (mut tree, mut is_joint) = match trees.next_as_stream() {
+                Some(next) => next.as_tree(),
+                None => return builder.add(quote!(.build())).build(),
+            };
+            if let TokenTree::Token(_, Token::Dollar) = tree {
+                let (next_tree, next_is_joint) = match trees.next_as_stream() {
+                    Some(next) => next.as_tree(),
+                    None => panic!("unexpected trailing `$` in `quote!`"),
                 };
-
-                quoted_tree.map(|quoted_tree| {
-                    quote!(::syntax::tokenstream::TokenStream::from((unquote quoted_tree)),)
-                })
+                match next_tree {
+                    TokenTree::Token(_, Token::Ident(..)) => {
+                        builder.push(quote!(.add(rt::token_stream_inner((unquote next_tree)))));
+                        continue
+                    }
+                    TokenTree::Token(_, Token::Dollar) => {
+                        tree = next_tree;
+                        is_joint = next_is_joint;
+                    }
+                    _ => panic!("`$` must be followed by an ident or `$` in `quote!`"),
+                }
             }
-        }
 
-        let quoted = Quoter(self.trees().peekable()).collect::<TokenStream>();
-        quote!([(unquote quoted)].iter().cloned().collect::<::syntax::tokenstream::TokenStream>())
+            builder.push(match is_joint {
+                true => quote!(.add((quote tree).joint())),
+                false => quote!(.add(rt::TokenStream::from((quote tree)))),
+            });
+        }
     }
 }
 
@@ -106,12 +123,10 @@ impl Quote for TokenTree {
     fn quote(&self) -> TokenStream {
         match *self {
             TokenTree::Token(_, ref token) => quote! {
-                ::syntax::tokenstream::TokenTree::Token(::syntax::ext::quote::rt::DUMMY_SP,
-                                                        (quote token))
+                rt::TokenTree::Token(rt::DUMMY_SP, (quote token))
             },
             TokenTree::Delimited(_, ref delimited) => quote! {
-                ::syntax::tokenstream::TokenTree::Delimited(::syntax::ext::quote::rt::DUMMY_SP,
-                                                            (quote delimited))
+                rt::TokenTree::Delimited(rt::DUMMY_SP, (quote delimited))
             },
         }
     }
@@ -119,10 +134,7 @@ impl Quote for TokenTree {
 
 impl Quote for Delimited {
     fn quote(&self) -> TokenStream {
-        quote!(::syntax::tokenstream::Delimited {
-            delim: (quote self.delim),
-            tts: (quote self.stream()).into(),
-        })
+        quote!(rt::Delimited { delim: (quote self.delim), tts: (quote self.stream()).into() })
     }
 }
 
@@ -136,13 +148,13 @@ impl<'a> Quote for &'a str {
 impl Quote for Ident {
     fn quote(&self) -> TokenStream {
         // FIXME(jseyfried) quote hygiene
-        quote!(::syntax::ast::Ident::from_str((quote &*self.name.as_str())))
+        quote!(rt::Ident::from_str((quote &*self.name.as_str())))
     }
 }
 
 impl Quote for Symbol {
     fn quote(&self) -> TokenStream {
-        quote!(::syntax::symbol::Symbol::intern((quote &*self.as_str())))
+        quote!(rt::Symbol::intern((quote &*self.as_str())))
     }
 }
 
@@ -151,7 +163,7 @@ impl Quote for Token {
         macro_rules! gen_match {
             ($($i:ident),*; $($t:tt)*) => {
                 match *self {
-                    $( Token::$i => quote!(::syntax::parse::token::$i), )*
+                    $( Token::$i => quote!(rt::token::$i), )*
                     $( $t )*
                 }
             }
@@ -162,15 +174,13 @@ impl Quote for Token {
             Comma, Semi, Colon, ModSep, RArrow, LArrow, FatArrow, Pound, Dollar, Question,
             Underscore;
 
-            Token::OpenDelim(delim) => quote!(::syntax::parse::token::OpenDelim((quote delim))),
-            Token::CloseDelim(delim) => quote!(::syntax::parse::token::CloseDelim((quote delim))),
-            Token::BinOp(tok) => quote!(::syntax::parse::token::BinOp((quote tok))),
-            Token::BinOpEq(tok) => quote!(::syntax::parse::token::BinOpEq((quote tok))),
-            Token::Ident(ident) => quote!(::syntax::parse::token::Ident((quote ident))),
-            Token::Lifetime(ident) => quote!(::syntax::parse::token::Lifetime((quote ident))),
-            Token::Literal(lit, sfx) => quote! {
-                ::syntax::parse::token::Literal((quote lit), (quote sfx))
-            },
+            Token::OpenDelim(delim) => quote!(rt::token::OpenDelim((quote delim))),
+            Token::CloseDelim(delim) => quote!(rt::token::CloseDelim((quote delim))),
+            Token::BinOp(tok) => quote!(rt::token::BinOp((quote tok))),
+            Token::BinOpEq(tok) => quote!(rt::token::BinOpEq((quote tok))),
+            Token::Ident(ident) => quote!(rt::token::Ident((quote ident))),
+            Token::Lifetime(ident) => quote!(rt::token::Lifetime((quote ident))),
+            Token::Literal(lit, sfx) => quote!(rt::token::Literal((quote lit), (quote sfx))),
             _ => panic!("Unhandled case!"),
         }
     }
@@ -181,7 +191,7 @@ impl Quote for token::BinOpToken {
         macro_rules! gen_match {
             ($($i:ident),*) => {
                 match *self {
-                    $( token::BinOpToken::$i => quote!(::syntax::parse::token::BinOpToken::$i), )*
+                    $( token::BinOpToken::$i => quote!(rt::token::BinOpToken::$i), )*
                 }
             }
         }
@@ -195,7 +205,7 @@ impl Quote for Lit {
         macro_rules! gen_match {
             ($($i:ident),*) => {
                 match *self {
-                    $( Lit::$i(lit) => quote!(::syntax::parse::token::Lit::$i((quote lit))), )*
+                    $( Lit::$i(lit) => quote!(rt::token::Lit::$i((quote lit))), )*
                     _ => panic!("Unsupported literal"),
                 }
             }
@@ -210,7 +220,7 @@ impl Quote for token::DelimToken {
         macro_rules! gen_match {
             ($($i:ident),*) => {
                 match *self {
-                    $(token::DelimToken::$i => { quote!(::syntax::parse::token::DelimToken::$i) })*
+                    $(token::DelimToken::$i => { quote!(rt::token::DelimToken::$i) })*
                 }
             }
         }

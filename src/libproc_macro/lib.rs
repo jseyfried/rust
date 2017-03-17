@@ -37,18 +37,23 @@
        test(no_crate_inject, attr(deny(warnings))),
        test(attr(allow(dead_code, deprecated, unused_variables, unused_mut))))]
 
+#![feature(conservative_impl_trait)]
 #![feature(rustc_private)]
 #![feature(staged_api)]
 #![feature(lang_items)]
 
 extern crate syntax;
+extern crate syntax_pos;
 
-use std::fmt;
+use std::{fmt, iter, ops};
 use std::str::FromStr;
 
+use syntax::ast;
 use syntax::errors::DiagnosticBuilder;
-use syntax::parse;
+use syntax::parse::{self, token};
+use syntax::symbol;
 use syntax::tokenstream;
+use syntax_pos::DUMMY_SP;
 
 /// The main type provided by this crate, representing an abstract stream of
 /// tokens.
@@ -60,6 +65,7 @@ use syntax::tokenstream;
 /// The API of this type is intentionally bare-bones, but it'll be expanded over
 /// time!
 #[stable(feature = "proc_macro_lib", since = "1.15.0")]
+#[derive(Clone)]
 pub struct TokenStream(tokenstream::TokenStream);
 
 /// Error returned from `TokenStream::from_str`.
@@ -67,6 +73,350 @@ pub struct TokenStream(tokenstream::TokenStream);
 #[stable(feature = "proc_macro_lib", since = "1.15.0")]
 pub struct LexError {
     _inner: (),
+}
+
+#[stable(feature = "proc_macro_lib", since = "1.15.0")]
+impl FromStr for TokenStream {
+    type Err = LexError;
+
+    fn from_str(src: &str) -> Result<TokenStream, LexError> {
+        __internal::with_parse_sess(|sess| {
+            let src = src.to_string();
+            let name = "<proc-macro source code>".to_string();
+            let stream = parse::parse_stream_from_source_str(name, src, sess);
+            Ok(__internal::token_stream_wrap(stream))
+        })
+    }
+}
+
+#[stable(feature = "proc_macro_lib", since = "1.15.0")]
+impl fmt::Display for TokenStream {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+#[macro_export]
+macro_rules! quote { () => {} }
+
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+impl From<TokenTree> for TokenStream {
+    fn from(tree: TokenTree) -> TokenStream {
+        TokenStream(tree.to_raw())
+    }
+}
+
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+impl<T: Into<TokenStream>> iter::FromIterator<T> for TokenStream {
+    fn from_iter<I: IntoIterator<Item = T>>(streams: I) -> Self {
+        let mut builder = tokenstream::TokenStream::builder();
+        for stream in streams {
+            builder.push(stream.into().0);
+        }
+        TokenStream(builder.build())
+    }
+}
+
+impl TokenStream {
+    /// Returns an empty `TokenStream`.
+    #[unstable(feature = "proc_macro_lib", issue = "38356")]
+    pub fn empty() -> TokenStream {
+        TokenStream(tokenstream::TokenStream::empty())
+    }
+
+    /// Checks if this `TokenStream` is empty.
+    #[unstable(feature = "proc_macro_lib", issue = "38356")]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Returns an iterator over `TokenTree`s
+    #[unstable(feature = "proc_macro_lib", issue = "38356")]
+    pub fn trees(&self) -> impl Iterator<Item = TokenTree> {
+        Cursor { cursor: self.0.trees(), next: None }
+    }
+}
+
+/// A region of source code, along with macro expansion information.
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+#[derive(Copy, Clone)]
+pub struct Span(syntax_pos::Span);
+
+/// A single token or a delimited sequence of token trees (e.g. `[1, (), ..]`).
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+#[derive(Clone)]
+pub struct TokenTree {
+    /// The `TokenTree`'s span
+    pub span: Span,
+    /// Description of the `TokenTree`
+    pub kind: TokenKind,
+}
+
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+impl fmt::Display for TokenTree {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        TokenStream::from(self.clone()).fmt(f)
+    }
+}
+
+/// Description of a `TokenTree`
+#[derive(Clone)]
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+pub enum TokenKind {
+    /// A delimited tokenstream.
+    Sequence(Delimiter, TokenStream),
+    /// A unicode identifier.
+    Word(Symbol),
+    /// A punctuation character (`+`, `,`, `$`, etc.).
+    Op(char, OpKind),
+    /// A literal character (`'a'`), string (`"hello"`), or number (`2.3`).
+    Literal(Literal),
+}
+
+/// Describes how a sequence of token trees is delimited.
+#[derive(Copy, Clone)]
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+pub enum Delimiter {
+    /// `( ... )`
+    Parenthesis,
+    /// `[ ... ]`
+    Brace,
+    /// `{ ... }`
+    Bracket,
+    /// An implicit delimiter, e.g. `$var`, where $var is  `...`.
+    None,
+}
+
+/// An interned string.
+#[derive(Copy, Clone)]
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+pub struct Symbol(symbol::Symbol);
+
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+impl ops::Deref for Symbol {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        unsafe { &*(self.0.as_str().deref() as *const str) }
+    }
+}
+
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+impl fmt::Display for Symbol {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.0.as_str().fmt(f)
+    }
+}
+
+/// Whether an `Op` is either followed immediately by another `Op` or followed by whitespace.
+#[derive(Copy, Clone)]
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+pub enum OpKind {
+    /// e.g. `+` is `Alone` in `+ =`.
+    Alone,
+    /// e.g. `+` is `Joint` in `+=`.
+    Joint,
+}
+
+/// A literal character (`'a'`), string (`"hello"`), or number (`2.3`). 
+#[derive(Clone)]
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+pub struct Literal(token::Token);
+
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+impl fmt::Display for Literal {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        TokenTree { kind: TokenKind::Literal(self.clone()), span: Span(DUMMY_SP) }.fmt(f)
+    }
+}
+
+struct Cursor {
+    cursor: tokenstream::Cursor,
+    next: Option<tokenstream::TokenStream>,
+}
+
+#[unstable(feature = "proc_macro_lib", issue = "38356")]
+impl Iterator for Cursor {
+    type Item = TokenTree;
+
+    fn next(&mut self) -> Option<TokenTree> {
+        self.next.take().or_else(|| self.cursor.next_as_stream())
+            .map(|next| TokenTree::from_raw(next, &mut self.next))
+    }
+}
+
+impl Delimiter {
+    fn from_raw(delim: token::DelimToken) -> Delimiter {
+        match delim {
+            token::Paren => Delimiter::Parenthesis,
+            token::Brace => Delimiter::Brace,
+            token::Bracket => Delimiter::Bracket,
+            token::NoDelim => Delimiter::None,
+        }
+    }
+
+    fn to_raw(self) -> token::DelimToken {
+        match self {
+            Delimiter::Parenthesis => token::Paren,
+            Delimiter::Brace => token::Brace,
+            Delimiter::Bracket => token::Bracket,
+            Delimiter::None => token::NoDelim,
+        }
+    }
+}
+
+impl TokenTree {
+    fn from_raw(stream: tokenstream::TokenStream, next: &mut Option<tokenstream::TokenStream>)
+                -> TokenTree {
+        use syntax::parse::token::*;
+
+        let (tree, is_joint) = stream.as_tree();
+        let (mut span, token) = match tree {
+            tokenstream::TokenTree::Token(span, token) => (span, token),
+            tokenstream::TokenTree::Delimited(span, delimed) => {
+                let delimiter = Delimiter::from_raw(delimed.delim);
+                return TokenTree {
+                    span: Span(span),
+                    kind: TokenKind::Sequence(delimiter, TokenStream(delimed.tts.into())),
+                };
+            }
+        };
+
+        let op_kind = if is_joint { OpKind::Joint } else { OpKind::Alone };
+        macro_rules! op {
+            ($op:expr) => { TokenKind::Op($op, op_kind) }
+        }
+
+        macro_rules! joint {
+            ($first:expr, $rest:expr) => { joint($first, $rest, is_joint, &mut span, next) }
+        }
+
+        fn joint(first: char, rest: Token, is_joint: bool, span: &mut syntax_pos::Span,
+                 next: &mut Option<tokenstream::TokenStream>)
+                 -> TokenKind {
+            let (first_span, rest_span) = (*span, *span);
+            *span = first_span;
+            let tree = tokenstream::TokenTree::Token(rest_span, rest);
+            *next = Some(if is_joint { tree.joint() } else { tree.into() });
+            TokenKind::Op(first, OpKind::Joint)
+        }
+
+        let kind = match token {
+            Eq => op!('='),
+            Lt => op!('<'),
+            Le => joint!('<', Eq),
+            EqEq => joint!('=', Eq),
+            Ne => joint!('!', Eq),
+            Ge => joint!('>', Eq),
+            Gt => op!('>'),
+            AndAnd => joint!('&', BinOp(And)),
+            OrOr => joint!('|', BinOp(Or)),
+            Not => op!('!'),
+            Tilde => op!('~'),
+            BinOp(Plus) => op!('+'),
+            BinOp(Minus) => op!('-'),
+            BinOp(Star) => op!('*'),
+            BinOp(Slash) => op!('/'),
+            BinOp(Percent) => op!('%'),
+            BinOp(Caret) => op!('^'),
+            BinOp(And) => op!('&'),
+            BinOp(Or) => op!('|'),
+            BinOp(Shl) => joint!('<', Lt),
+            BinOp(Shr) => joint!('>', Gt),
+            BinOpEq(Plus) => joint!('+', Eq),
+            BinOpEq(Minus) => joint!('-', Eq),
+            BinOpEq(Star) => joint!('*', Eq),
+            BinOpEq(Slash) => joint!('/', Eq),
+            BinOpEq(Percent) => joint!('%', Eq),
+            BinOpEq(Caret) => joint!('^', Eq),
+            BinOpEq(And) => joint!('&', Eq),
+            BinOpEq(Or) => joint!('|', Eq),
+            BinOpEq(Shl) => joint!('<', Le),
+            BinOpEq(Shr) => joint!('>', Ge),
+            At => op!('@'),
+            Dot => op!('.'),
+            DotDot => joint!('.', Dot),
+            DotDotDot => joint!('.', DotDot),
+            Comma => op!(','),
+            Semi => op!(';'),
+            Colon => op!(':'),
+            ModSep => joint!(':', Colon),
+            RArrow => joint!('-', Gt),
+            LArrow => joint!('<', BinOp(Minus)),
+            FatArrow => joint!('=', Gt),
+            Pound => op!('#'),
+            Dollar => op!('$'),
+            Question => op!('?'),
+            Underscore => op!('_'),
+
+            Ident(ident) | Lifetime(ident) => TokenKind::Word(Symbol(ident.name)),
+            Literal(..) | DocComment(..) => TokenKind::Literal(self::Literal(token)),
+
+            Interpolated(..) => unimplemented!(),
+            SubstNt(..) => unimplemented!(),
+
+            OpenDelim(..) | CloseDelim(..) => unreachable!(),
+            Whitespace | Comment | Shebang(..) | Eof => unreachable!(),
+        };
+
+        TokenTree { span: Span(span), kind: kind }
+    }
+
+    fn to_raw(self) -> tokenstream::TokenStream {
+        use syntax::ext::hygiene::SyntaxContext;
+        use syntax::parse::token::*;
+        use syntax::tokenstream::{TokenTree, Delimited};
+
+        let (op, kind) = match self.kind {
+            TokenKind::Op(op, kind) => (op, kind),
+            TokenKind::Sequence(delimiter, tokens) => {
+                return TokenTree::Delimited(self.span.0, Delimited {
+                    delim: delimiter.to_raw(),
+                    tts: tokens.0.into(),
+                }).into();
+            },
+            TokenKind::Word(symbol) => {
+                let ident = ast::Ident { name: symbol.0, ctxt: self.span.0.ctxt };
+                let token =
+                    if symbol.0.as_str().starts_with("'") { Lifetime(ident) } else { Ident(ident) };
+                return TokenTree::Token(self.span.0, token).into();
+            }
+            TokenKind::Literal(token) => return TokenTree::Token(self.span.0, token.0).into(),
+        };
+
+        let token = match op {
+            '=' => Eq,
+            '<' => Lt,
+            '>' => Gt,
+            '!' => Not,
+            '~' => Tilde,
+            '+' => BinOp(Plus),
+            '-' => BinOp(Minus),
+            '*' => BinOp(Star),
+            '/' => BinOp(Slash),
+            '%' => BinOp(Percent),
+            '^' => BinOp(Caret),
+            '&' => BinOp(And),
+            '|' => BinOp(Or),
+            '@' => At,
+            '.' => Dot,
+            ',' => Comma,
+            ';' => Semi,
+            ':' => Colon,
+            '#' => Pound,
+            '$' => Dollar,
+            '?' => Question,
+            '_' => Underscore,
+            _ => panic!("unsupported character {}", op),
+        };
+
+        let tree = TokenTree::Token(self.span.0, token);
+        match kind {
+            OpKind::Alone => tree.into(),
+            OpKind::Joint => tree.joint(),
+        }
+    }
 }
 
 /// Permanently unstable internal implementation details of this crate. This
@@ -80,7 +430,11 @@ pub struct LexError {
 /// all of the contents.
 #[unstable(feature = "proc_macro_internals", issue = "27812")]
 #[doc(hidden)]
+#[path = ""]
 pub mod __internal {
+    mod quote;
+    pub use self::quote::{Quoter, __rt};
+
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -113,8 +467,8 @@ pub mod __internal {
         })
     }
 
-    pub fn token_stream_inner(stream: TokenStream) -> tokenstream::TokenStream {
-        stream.0
+    pub fn token_stream_inner<T: Into<TokenStream>>(stream: T) -> tokenstream::TokenStream {
+        stream.into().0
     }
 
     pub trait Registry {
@@ -168,25 +522,4 @@ pub mod __internal {
 fn parse_to_lex_err(mut err: DiagnosticBuilder) -> LexError {
     err.cancel();
     LexError { _inner: () }
-}
-
-#[stable(feature = "proc_macro_lib", since = "1.15.0")]
-impl FromStr for TokenStream {
-    type Err = LexError;
-
-    fn from_str(src: &str) -> Result<TokenStream, LexError> {
-        __internal::with_parse_sess(|sess| {
-            let src = src.to_string();
-            let name = "<proc-macro source code>".to_string();
-            let stream = parse::parse_stream_from_source_str(name, src, sess);
-            Ok(__internal::token_stream_wrap(stream))
-        })
-    }
-}
-
-#[stable(feature = "proc_macro_lib", since = "1.15.0")]
-impl fmt::Display for TokenStream {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.fmt(f)
-    }
 }

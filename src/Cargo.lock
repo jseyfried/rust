@@ -350,14 +350,6 @@ name = "proc_macro"
 version = "0.0.0"
 dependencies = [
  "syntax 0.0.0",
-]
-
-[[package]]
-name = "proc_macro_plugin"
-version = "0.0.0"
-dependencies = [
- "rustc_plugin 0.0.0",
- "syntax 0.0.0",
  "syntax_pos 0.0.0",
 ]
 
@@ -541,7 +533,6 @@ dependencies = [
  "arena 0.0.0",
  "graphviz 0.0.0",
  "log 0.0.0",
- "proc_macro_plugin 0.0.0",
  "rustc 0.0.0",
  "rustc_back 0.0.0",
  "rustc_borrowck 0.0.0",

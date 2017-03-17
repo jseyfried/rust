@@ -468,7 +468,7 @@ impl<'a, 'tcx> CrateMetadata {
         }
     }
 
-    fn item_name(&self, item_index: DefIndex) -> ast::Name {
+    pub fn item_name(&self, item_index: DefIndex) -> ast::Name {
         self.def_key(item_index)
             .disambiguated_data
             .data
