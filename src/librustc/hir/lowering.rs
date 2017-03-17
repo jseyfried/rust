@@ -1479,7 +1479,7 @@ impl<'a> LoweringContext<'a> {
         if let ItemKind::MacroDef(ref tts) = i.node {
             if i.attrs.iter().any(|attr| attr.path == "macro_export") {
                 self.exported_macros.push(hir::MacroDef {
-                    name: name, attrs: attrs, id: i.id, span: i.span, body: tts.clone().into(),
+                    name: name, attrs: attrs, id: i.id, span: i.span, body: tts.stream(),
                 });
             }
             return None;

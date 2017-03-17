@@ -185,7 +185,7 @@ pub fn compile(sess: &ParseSess, def: &ast::Item) -> SyntaxExtension {
 
     // Parse the macro_rules! invocation
     let body = match def.node {
-        ast::ItemKind::MacroDef(ref body) => body.clone().into(),
+        ast::ItemKind::MacroDef(ref body) => body.stream(),
         _ => unreachable!(),
     };
     let argument_map = match parse(sess, body, &argument_gram, None) {
