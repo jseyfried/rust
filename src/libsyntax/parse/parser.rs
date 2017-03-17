@@ -1394,7 +1394,7 @@ impl<'a> Parser<'a> {
             let full_span = hi.map(|hi| Span {
                 lo: lhs.span.lo,
                 hi: hi,
-                expn_id: lhs.span.expn_id,
+                ctxt: lhs.span.ctxt,
             });
             match (&lhs.node, full_span) {
                 (&TyKind::Rptr(ref lifetime, ref mut_ty), Some(full_span)) => {
