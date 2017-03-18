@@ -532,6 +532,7 @@ pub struct MacroDef {
     pub id: NodeId,
     pub span: Span,
     pub body: TokenStream,
+    pub legacy: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]

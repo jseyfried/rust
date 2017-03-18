@@ -1054,6 +1054,13 @@ impl<'a> NameBinding<'a> {
             _ => true,
         }
     }
+
+    fn is_macro_def(&self) -> bool {
+        match self.kind {
+            NameBindingKind::Def(Def::Macro(..)) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Interns the names of the primitive types.
@@ -1367,8 +1374,9 @@ impl<'a> Resolver<'a> {
                 vis: ty::Visibility::Public,
             }),
 
-            // `#![feature(proc_macro)]` implies `#[feature(extern_macros)]`
-            use_extern_macros: features.use_extern_macros || features.proc_macro,
+            // The `proc_macro` and `decl_macro` features imply `use_extern_macros`
+            use_extern_macros:
+                features.use_extern_macros || features.proc_macro || features.decl_macro,
 
             crate_loader: crate_loader,
             macro_names: FxHashSet(),

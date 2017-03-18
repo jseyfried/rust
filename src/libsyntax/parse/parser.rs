@@ -3654,33 +3654,56 @@ impl<'a> Parser<'a> {
     fn eat_macro_def(&mut self, attrs: &[Attribute], vis: &Visibility)
                      -> PResult<'a, Option<P<Item>>> {
         let lo = self.span;
-        match self.token {
-            token::Ident(ident) if ident.name == "macro_rules" => {
-                if self.look_ahead(1, |t| *t == token::Not) {
-                    let prev_span = self.prev_span;
-                    self.complain_if_pub_macro(vis, prev_span);
-                    self.bump();
-                    self.bump();
+        let (ident, def) = match self.token {
+            token::Ident(ident) if ident.name == keywords::Macro.name() => {
+                self.bump();
+                let ident = self.parse_ident()?;
+                let args = if self.token == token::OpenDelim(token::Paren) {
+                    self.parse_token_tree()
+                } else {
+                    self.expect(&token::OpenDelim(token::Paren))?;
+                    unreachable!()
+                };
+                let body = if self.token == token::OpenDelim(token::Brace) {
+                    self.parse_token_tree()
+                } else {
+                    self.expect(&token::OpenDelim(token::Brace))?;
+                    unreachable!()
+                };
+
+                (ident, ast::MacroDef {
+                    tokens: TokenStream::concat(vec![
+                        args.into(),
+                        TokenTree::Token(lo.to(self.prev_span), token::FatArrow).into(),
+                        body.into(),
+                    ]).into(),
+                    legacy: false,
+                })
+            }
+            token::Ident(ident) if ident.name == "macro_rules" &&
+                                   self.look_ahead(1, |t| *t == token::Not) => {
+                let prev_span = self.prev_span;
+                self.complain_if_pub_macro(vis, prev_span);
+                self.bump();
+                self.bump();
+
+                let ident = self.parse_ident()?;
+                let (delim, tokens) = self.expect_delimited_token_tree()?;
+                if delim != token::Brace {
+                    if !self.eat(&token::Semi) {
+                        let msg = "macros that expand to items must either \
+                                   be surrounded with braces or followed by a semicolon";
+                        self.span_err(self.prev_span, msg);
+                    }
                 }
+
+                (ident, ast::MacroDef { tokens: tokens, legacy: true })
             }
             _ => return Ok(None),
         };
 
-        let id = self.parse_ident()?;
-        let (delim, tts) = self.expect_delimited_token_tree()?;
-        if delim != token::Brace {
-            if !self.eat(&token::Semi) {
-                let msg = "macros that expand to items must either be surrounded with braces \
-                           or followed by a semicolon";
-                self.span_err(self.prev_span, msg);
-            }
-        }
-
         let span = lo.to(self.prev_span);
-        let kind = ItemKind::MacroDef(ast::MacroDef {
-            tokens: tts,
-        });
-        Ok(Some(self.mk_item(span, id, kind, Visibility::Inherited, attrs.to_owned())))
+        Ok(Some(self.mk_item(span, ident, ItemKind::MacroDef(def), vis.clone(), attrs.to_vec())))
     }
 
     fn parse_stmt_without_recovery(&mut self,

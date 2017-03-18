@@ -636,7 +636,10 @@ impl<'a> Resolver<'a> {
         });
     }
 
-    pub fn define_macro(&mut self, item: &ast::Item, legacy_scope: &mut LegacyScope<'a>) {
+    pub fn define_macro(&mut self,
+                        item: &ast::Item,
+                        expansion: Mark,
+                        legacy_scope: &mut LegacyScope<'a>) {
         self.local_macro_def_scopes.insert(item.id, self.current_module);
         let ident = item.ident;
         if ident.name == "macro_rules" {
@@ -646,14 +649,22 @@ impl<'a> Resolver<'a> {
         let def_id = self.definitions.local_def_id(item.id);
         let ext = Rc::new(macro_rules::compile(&self.session.parse_sess, item));
         self.macro_map.insert(def_id, ext);
-        *legacy_scope = LegacyScope::Binding(self.arenas.alloc_legacy_binding(LegacyBinding {
-            parent: Cell::new(*legacy_scope), name: ident.name, def_id: def_id, span: item.span,
-        }));
-        self.macro_names.insert(ident.name);
 
-        if attr::contains_name(&item.attrs, "macro_export") {
+        let def = match item.node { ast::ItemKind::MacroDef(ref def) => def, _ => unreachable!() };
+        if def.legacy {
+            self.macro_names.insert(ident.name);
+            *legacy_scope = LegacyScope::Binding(self.arenas.alloc_legacy_binding(LegacyBinding {
+                parent: Cell::new(*legacy_scope), name: ident.name, def_id: def_id, span: item.span,
+            }));
+            if attr::contains_name(&item.attrs, "macro_export") {
+                let def = Def::Macro(def_id, MacroKind::Bang);
+                self.macro_exports.push(Export { name: ident.name, def: def, span: item.span });
+            }
+        } else {
+            let module = self.current_module;
             let def = Def::Macro(def_id, MacroKind::Bang);
-            self.macro_exports.push(Export { name: ident.name, def: def, span: item.span });
+            let vis = self.resolve_visibility(&item.vis);
+            self.define(module, ident, MacroNS, (def, vis, item.span, expansion));
         }
     }
 
