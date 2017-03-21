@@ -55,6 +55,7 @@ use std::mem;
 use syntax::attr;
 use syntax::ast::*;
 use syntax::errors;
+use syntax::ext::hygiene::{Mark, SyntaxContext};
 use syntax::ptr::P;
 use syntax::codemap::{self, respan, Spanned};
 use syntax::std_inject;
@@ -252,7 +253,8 @@ impl<'a> LoweringContext<'a> {
     }
 
     fn allow_internal_unstable(&self, reason: &'static str, mut span: Span) -> Span {
-        span.expn_id = self.sess.codemap().record_expansion(codemap::ExpnInfo {
+        let mark = Mark::fresh();
+        mark.set_expn_info(codemap::ExpnInfo {
             call_site: span,
             callee: codemap::NameAndSpan {
                 format: codemap::CompilerDesugaring(Symbol::intern(reason)),
@@ -260,6 +262,7 @@ impl<'a> LoweringContext<'a> {
                 allow_internal_unstable: true,
             },
         });
+        span.ctxt = SyntaxContext::empty().apply_mark(mark);
         span
     }
 
@@ -1827,7 +1830,7 @@ impl<'a> LoweringContext<'a> {
                         volatile: asm.volatile,
                         alignstack: asm.alignstack,
                         dialect: asm.dialect,
-                        expn_id: asm.expn_id,
+                        ctxt: asm.ctxt,
                     };
                     let outputs =
                         asm.outputs.iter().map(|out| self.lower_expr(&out.expr)).collect();
