@@ -184,11 +184,11 @@ pub fn compile(sess: &ParseSess, def: &ast::Item) -> SyntaxExtension {
     ];
 
     // Parse the macro_rules! invocation
-    let body = match def.node {
-        ast::ItemKind::MacroDef(ref body) => body.stream(),
+    let def_body = match def.node {
+        ast::ItemKind::MacroDef(ref def_body) => def_body,
         _ => unreachable!(),
     };
-    let argument_map = match parse(sess, body, &argument_gram, None) {
+    let argument_map = match parse(sess, def_body.stream(), &argument_gram, None) {
         Success(m) => m,
         Failure(sp, tok) => {
             let s = parse_failure_msg(tok);
@@ -248,7 +248,11 @@ pub fn compile(sess: &ParseSess, def: &ast::Item) -> SyntaxExtension {
         valid: valid,
     });
 
-    NormalTT(exp, Some(def.span), attr::contains_name(&def.attrs, "allow_internal_unstable"))
+    if def_body.legacy {
+        NormalTT(exp, Some(def.span), attr::contains_name(&def.attrs, "allow_internal_unstable"))
+    } else {
+        SyntaxExtension::DeclMacro(exp, Some(def.span))
+    }
 }
 
 fn check_lhs_nt_follows(sess: &ParseSess, lhs: &quoted::TokenTree) -> bool {

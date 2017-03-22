@@ -9,6 +9,7 @@
 // except according to those terms.
 
 #![crate_name = "rustdoc"]
+pub fn main() {} /*
 #![unstable(feature = "rustdoc", issue = "27812")]
 #![crate_type = "dylib"]
 #![crate_type = "rlib"]
@@ -443,3 +444,4 @@ where R: 'static + Send, F: 'static + Send + FnOnce(Output) -> R {
     });
     rx.recv().unwrap()
 }
+*/

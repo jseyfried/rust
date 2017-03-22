@@ -857,6 +857,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         Entry {
             kind: EntryKind::MacroDef(self.lazy(&MacroDef {
                 body: pprust::tts_to_string(&macro_def.body.trees().collect::<Vec<_>>()),
+                legacy: macro_def.legacy,
             })),
             visibility: self.lazy(&ty::Visibility::Public),
             span: self.lazy(&macro_def.span),

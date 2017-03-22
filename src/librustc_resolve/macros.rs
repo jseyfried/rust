@@ -92,7 +92,7 @@ impl<'a> base::Resolver for Resolver<'a> {
     }
 
     fn get_module_scope(&mut self, id: ast::NodeId) -> Mark {
-        let mark = Mark::fresh();
+        let mark = Mark::fresh(Mark::root());
         let module = self.module_map[&self.definitions.local_def_id(id)];
         self.invocations.insert(mark, self.arenas.alloc_invocation_data(InvocationData {
             module: Cell::new(module),
@@ -112,7 +112,7 @@ impl<'a> base::Resolver for Resolver<'a> {
                 let ident = path.segments[0].identifier;
                 if ident.name == "$crate" {
                     path.segments[0].identifier.name = keywords::CrateRoot.name();
-                    let module = self.0.resolve_crate_var(ident.ctxt);
+                    let module = self.0.resolve_crate_root(ident.ctxt);
                     if !module.is_local() {
                         let span = path.segments[0].span;
                         path.segments.insert(1, match module.kind {
@@ -272,7 +272,11 @@ impl<'a> base::Resolver for Resolver<'a> {
             },
         };
         self.macro_defs.insert(invoc.expansion_data.mark, def.def_id());
-        Ok(Some(self.get_macro(def)))
+        let ext = self.get_macro(def);
+        if ext.is_modern() {
+            invoc.expansion_data.mark.set_modern();
+        }
+        Ok(Some(ext))
     }
 
     fn resolve_macro(&mut self, scope: Mark, path: &ast::Path, kind: MacroKind, force: bool)
@@ -400,16 +404,23 @@ impl<'a> Resolver<'a> {
 
     // Resolve the initial segment of a non-global macro path (e.g. `foo` in `foo::bar!();`)
     pub fn resolve_lexical_macro_path_segment(&mut self,
-                                              ident: Ident,
+                                              mut ident: Ident,
                                               ns: Namespace,
                                               record_used: Option<Span>)
                                               -> Result<&'a NameBinding<'a>, Determinacy> {
+        ident.ctxt = ident.ctxt.modern();
         let mut module = self.current_module;
         let mut potential_expanded_shadower: Option<&NameBinding> = None;
         loop {
+            let orig_current_module = self.current_module;
+            self.current_module = module; // Lexical resolutions can never be a privacy error.
             // Since expanded macros may not shadow the lexical scope (enforced below),
             // we can ignore unresolved invocations (indicated by the penultimate argument).
-            match self.resolve_ident_in_module(module, ident, ns, true, record_used) {
+            let result =
+                self.resolve_ident_in_module_unadjusted(module, ident, ns, true, record_used);
+            self.current_module = orig_current_module;
+
+            match result {
                 Ok(binding) => {
                     let span = match record_used {
                         Some(span) => span,
@@ -432,14 +443,13 @@ impl<'a> Resolver<'a> {
                 Err(Determinacy::Determined) => {}
             }
 
-            match module.kind {
-                ModuleKind::Block(..) => module = module.parent.unwrap(),
-                ModuleKind::Def(..) => return match potential_expanded_shadower {
-                    Some(binding) => Ok(binding),
-                    None if record_used.is_some() => Err(Determinacy::Determined),
-                    None => Err(Determinacy::Undetermined),
-                },
-            }
+            module = unwrap_or!(self.hygienic_lexical_parent(module, &mut ident.ctxt), break);
+        }
+
+        match potential_expanded_shadower {
+            Some(binding) => Ok(binding),
+            None if record_used.is_some() => Err(Determinacy::Determined),
+            None => Err(Determinacy::Undetermined),
         }
     }
 

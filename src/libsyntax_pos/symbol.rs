@@ -36,7 +36,7 @@ impl Ident {
     }
 
     pub fn unhygienize(self) -> Ident {
-        Ident { name: self.name, ctxt: SyntaxContext::empty() }
+        Ident { name: self.name, ctxt: self.ctxt.modern() }
     }
 }
 

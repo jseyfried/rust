@@ -42,7 +42,7 @@ use rustc::middle::cstore::CrateLoader;
 use rustc::session::Session;
 use rustc::lint;
 use rustc::hir::def::*;
-use rustc::hir::def_id::{CrateNum, CRATE_DEF_INDEX, LOCAL_CRATE, DefId};
+use rustc::hir::def_id::{CRATE_DEF_INDEX, LOCAL_CRATE, DefId};
 use rustc::ty;
 use rustc::hir::{Freevar, FreevarMap, TraitCandidate, TraitMap, GlobMap};
 use rustc::util::nodemap::{NodeMap, NodeSet, FxHashMap, FxHashSet, DefIdMap};
@@ -50,7 +50,7 @@ use rustc::util::nodemap::{NodeMap, NodeSet, FxHashMap, FxHashSet, DefIdMap};
 use syntax::ext::hygiene::{Mark, SyntaxContext};
 use syntax::ast::{self, Name, NodeId, Ident, SpannedIdent, FloatTy, IntTy, UintTy};
 use syntax::ext::base::SyntaxExtension;
-use syntax::ext::base::Determinacy::{Determined, Undetermined};
+use syntax::ext::base::Determinacy::{self, Determined, Undetermined};
 use syntax::ext::base::MacroKind;
 use syntax::symbol::{Symbol, keywords};
 use syntax::util::lev_distance::find_best_match_for_name;
@@ -865,12 +865,20 @@ pub struct ModuleData<'a> {
     // access the children must be preceded with a
     // `populate_module_if_necessary` call.
     populated: Cell<bool>,
+
+    expansion: Mark,
+    span: Span,
 }
 
 pub type Module<'a> = &'a ModuleData<'a>;
 
 impl<'a> ModuleData<'a> {
-    fn new(parent: Option<Module<'a>>, kind: ModuleKind, normal_ancestor_id: DefId) -> Self {
+    fn new(parent: Option<Module<'a>>,
+           kind: ModuleKind,
+           normal_ancestor_id: DefId,
+           expansion: Mark,
+           span: Span)
+           -> Self {
         ModuleData {
             parent: parent,
             kind: kind,
@@ -884,6 +892,8 @@ impl<'a> ModuleData<'a> {
             globs: RefCell::new((Vec::new())),
             traits: RefCell::new(None),
             populated: Cell::new(normal_ancestor_id.is_local()),
+            expansion: expansion,
+            span: span,
         }
     }
 
@@ -1160,7 +1170,7 @@ pub struct Resolver<'a> {
     // entry block for `f`.
     block_map: NodeMap<Module<'a>>,
     module_map: FxHashMap<DefId, Module<'a>>,
-    extern_crate_roots: FxHashMap<(CrateNum, bool /* MacrosOnly? */), Module<'a>>,
+    extern_module_map: FxHashMap<(DefId, bool /* MacrosOnly? */), Module<'a>>,
 
     pub make_glob_map: bool,
     // Maps imports to the names of items actually imported (this actually maps
@@ -1300,7 +1310,7 @@ impl<'a> Resolver<'a> {
         let root_module_kind = ModuleKind::Def(Def::Mod(root_def_id), keywords::Invalid.name());
         let graph_root = arenas.alloc_module(ModuleData {
             no_implicit_prelude: attr::contains_name(&krate.attrs, "no_implicit_prelude"),
-            ..ModuleData::new(None, root_module_kind, root_def_id)
+            ..ModuleData::new(None, root_module_kind, root_def_id, Mark::root(), DUMMY_SP)
         });
         let mut module_map = FxHashMap();
         module_map.insert(DefId::local(CRATE_DEF_INDEX), graph_root);
@@ -1353,7 +1363,7 @@ impl<'a> Resolver<'a> {
             trait_map: NodeMap(),
             module_map: module_map,
             block_map: NodeMap(),
-            extern_crate_roots: FxHashMap(),
+            extern_module_map: FxHashMap(),
 
             make_glob_map: make_glob_map == MakeGlobMap::Yes,
             glob_map: NodeMap(),
@@ -1432,9 +1442,15 @@ impl<'a> Resolver<'a> {
         self.crate_loader.postprocess(krate);
     }
 
-    fn new_module(&self, parent: Module<'a>, kind: ModuleKind, normal_ancestor_id: DefId)
+    fn new_module(&self,
+                  parent: Module<'a>,
+                  kind: ModuleKind,
+                  normal_ancestor_id: DefId,
+                  expansion: Mark,
+                  span: Span)
                   -> Module<'a> {
-        self.arenas.alloc_module(ModuleData::new(Some(parent), kind, normal_ancestor_id))
+        let module = ModuleData::new(Some(parent), kind, normal_ancestor_id, expansion, span);
+        self.arenas.alloc_module(module)
     }
 
     fn record_use(&mut self, ident: Ident, ns: Namespace, binding: &'a NameBinding<'a>, span: Span)
@@ -1495,10 +1511,11 @@ impl<'a> Resolver<'a> {
                                       record_used: Option<Span>)
                                       -> Option<LexicalScopeBinding<'a>> {
         if ns == TypeNS {
-            ident = ident.unhygienize();
+            ident.ctxt = ident.ctxt.modern();
         }
 
         // Walk backwards up the ribs in scope.
+        let mut module = self.graph_root;
         for i in (0 .. self.ribs[ns].len()).rev() {
             if let Some(def) = self.ribs[ns][i].bindings.get(&ident).cloned() {
                 // The ident resolves to a type parameter or local variable.
@@ -1507,43 +1524,113 @@ impl<'a> Resolver<'a> {
                 ));
             }
 
-            if let ModuleRibKind(module) = self.ribs[ns][i].kind {
-                let item = self.resolve_ident_in_module(module, ident, ns, false, record_used);
-                if let Ok(binding) = item {
-                    // The ident resolves to an item.
-                    return Some(LexicalScopeBinding::Item(binding));
+            module = match self.ribs[ns][i].kind {
+                ModuleRibKind(module) => module,
+                MacroDefinition(def) if def == self.macro_defs[&ident.ctxt.outer()] => {
+                    // If an invocation of this macro created `ident`, give up on `ident`
+                    // and switch to `ident`'s source from the macro definition.
+                    ident.ctxt.remove_mark();
+                    continue
                 }
+                _ => continue,
+            };
 
-                if let ModuleKind::Block(..) = module.kind { // We can see through blocks
-                } else if !module.no_implicit_prelude {
-                    return self.prelude.and_then(|prelude| {
-                        self.resolve_ident_in_module(prelude, ident, ns, false, None).ok()
-                    }).map(LexicalScopeBinding::Item)
+            let item =
+                self.resolve_ident_in_module_unadjusted(module, ident, ns, false, record_used);
+            if let Ok(binding) = item {
+                // The ident resolves to an item.
+                return Some(LexicalScopeBinding::Item(binding));
+            }
+
+            match module.kind {
+                ModuleKind::Block(..) => {}, // We can see through blocks
+                _ => break,
+            }
+        }
+
+        ident.ctxt = ident.ctxt.modern();
+        loop {
+            module = unwrap_or!(self.hygienic_lexical_parent(module, &mut ident.ctxt), break);
+            let orig_current_module = self.current_module;
+            self.current_module = module; // Lexical resolutions can never be a privacy error.
+            let result =
+                self.resolve_ident_in_module_unadjusted(module, ident, ns, false, record_used);
+            self.current_module = orig_current_module;
+
+            match result {
+                Ok(binding) => return Some(LexicalScopeBinding::Item(binding)),
+                Err(Undetermined) => return None,
+                Err(Determined) => {}
+            }
+        }
+
+        match self.prelude {
+            Some(prelude) if !module.no_implicit_prelude =>
+                self.resolve_ident_in_module_unadjusted(prelude, ident, ns, false, None).ok()
+                    .map(LexicalScopeBinding::Item),
+            _ => None,
+        }
+    }
+
+    fn hygienic_lexical_parent(&mut self, mut module: Module<'a>, ctxt: &mut SyntaxContext)
+                               -> Option<Module<'a>> {
+        if !module.expansion.is_descendant_of(ctxt.outer()) {
+            return Some(self.macro_def_scope(ctxt.remove_mark()));
+        }
+
+        if let ModuleKind::Block(..) = module.kind {
+            return Some(module.parent.unwrap());
+        }
+
+        while let Some(parent) = module.parent {
+            if module.expansion.is_descendant_of(parent.expansion) &&
+               parent.expansion != module.expansion {
+                return if parent.expansion.is_descendant_of(ctxt.outer()) {
+                    Some(parent)
                 } else {
-                    return None;
-                }
+                    None
+                };
             }
-
-            if let MacroDefinition(def) = self.ribs[ns][i].kind {
-                // If an invocation of this macro created `ident`, give up on `ident`
-                // and switch to `ident`'s source from the macro definition.
-                let ctxt_data = ident.ctxt.data();
-                if def == self.macro_defs[&ctxt_data.outer_mark] {
-                    ident.ctxt = ctxt_data.prev_ctxt;
-                }
-            }
+            module = parent;
         }
 
         None
     }
 
-    fn resolve_crate_var(&mut self, crate_var_ctxt: SyntaxContext) -> Module<'a> {
-        let mut ctxt_data = crate_var_ctxt.data();
-        while ctxt_data.prev_ctxt != SyntaxContext::empty() {
-            ctxt_data = ctxt_data.prev_ctxt.data();
+    fn resolve_ident_in_module(&mut self,
+                               module: Module<'a>,
+                               mut ident: Ident,
+                               ns: Namespace,
+                               ignore_unresolved_invocations: bool,
+                               record_used: Option<Span>)
+                               -> Result<&'a NameBinding<'a>, Determinacy> {
+        ident.ctxt = ident.ctxt.modern();
+        let orig_current_module = self.current_module;
+        if let Some(def) = ident.ctxt.adjust(module.expansion) {
+            self.current_module = self.macro_def_scope(def);
         }
-        let module = self.macro_def_scope(ctxt_data.outer_mark);
-        if module.is_local() { self.graph_root } else { module }
+        let result = self.resolve_ident_in_module_unadjusted(
+            module, ident, ns, ignore_unresolved_invocations, record_used,
+        );
+        self.current_module = orig_current_module;
+        result
+    }
+
+    fn resolve_crate_root(&mut self, mut ctxt: SyntaxContext) -> Module<'a> {
+        let module = match ctxt.adjust(Mark::root()) {
+            Some(def) => self.macro_def_scope(def),
+            None => return self.graph_root,
+        };
+        self.get_module(DefId { index: CRATE_DEF_INDEX, ..module.normal_ancestor_id })
+    }
+
+    fn resolve_self(&mut self, ctxt: &mut SyntaxContext, module: Module<'a>) -> Module<'a> {
+        let mut module = self.get_module(module.normal_ancestor_id);
+        while module.span.ctxt.modern() != *ctxt {
+            let parent = module.parent.unwrap_or_else(|| self.macro_def_scope(ctxt.remove_mark()));
+            module = self.get_module(parent.normal_ancestor_id);
+        }
+        module
     }
 
     // AST resolution
@@ -1591,16 +1678,11 @@ impl<'a> Resolver<'a> {
     fn search_label(&self, mut ident: Ident) -> Option<Def> {
         for rib in self.label_ribs.iter().rev() {
             match rib.kind {
-                NormalRibKind => {
-                    // Continue
-                }
-                MacroDefinition(def) => {
-                    // If an invocation of this macro created `ident`, give up on `ident`
-                    // and switch to `ident`'s source from the macro definition.
-                    let ctxt_data = ident.ctxt.data();
-                    if def == self.macro_defs[&ctxt_data.outer_mark] {
-                        ident.ctxt = ctxt_data.prev_ctxt;
-                    }
+                NormalRibKind => {}
+                // If an invocation of this macro created `ident`, give up on `ident`
+                // and switch to `ident`'s source from the macro definition.
+                MacroDefinition(def) if def == self.macro_defs[&ident.ctxt.outer()] => {
+                    ident.ctxt.remove_mark();
                 }
                 _ => {
                     // Do not resolve labels across function boundary
@@ -2554,13 +2636,17 @@ impl<'a> Resolver<'a> {
             let ns = if is_last { opt_ns.unwrap_or(TypeNS) } else { TypeNS };
 
             if i == 0 && ns == TypeNS && ident.name == keywords::SelfValue.name() {
-                module = Some(self.module_map[&self.current_module.normal_ancestor_id]);
+                let mut ctxt = ident.ctxt.modern();
+                module = Some(self.resolve_self(&mut ctxt, self.current_module));
                 continue
             } else if allow_super && ns == TypeNS && ident.name == keywords::Super.name() {
-                let current_module = if i == 0 { self.current_module } else { module.unwrap() };
-                let self_module = self.module_map[&current_module.normal_ancestor_id];
+                let mut ctxt = ident.ctxt.modern();
+                let self_module = match i {
+                    0 => self.resolve_self(&mut ctxt, self.current_module),
+                    _ => module.unwrap(),
+                };
                 if let Some(parent) = self_module.parent {
-                    module = Some(self.module_map[&parent.normal_ancestor_id]);
+                    module = Some(self.resolve_self(&mut ctxt, parent));
                     continue
                 } else {
                     let msg = "There are too many initial `super`s.".to_string();
@@ -2570,10 +2656,10 @@ impl<'a> Resolver<'a> {
             allow_super = false;
 
             if i == 0 && ns == TypeNS && ident.name == keywords::CrateRoot.name() {
-                module = Some(self.graph_root);
+                module = Some(self.resolve_crate_root(ident.ctxt.modern()));
                 continue
             } else if i == 0 && ns == TypeNS && ident.name == "$crate" {
-                module = Some(self.resolve_crate_var(ident.ctxt));
+                module = Some(self.resolve_crate_root(ident.ctxt));
                 continue
             }
 
@@ -3051,7 +3137,8 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    fn get_traits_containing_item(&mut self, ident: Ident, ns: Namespace) -> Vec<TraitCandidate> {
+    fn get_traits_containing_item(&mut self, mut ident: Ident, ns: Namespace)
+                                  -> Vec<TraitCandidate> {
         debug!("(getting traits containing item) looking for '{}'", ident.name);
 
         let mut found_traits = Vec::new();
@@ -3063,13 +3150,12 @@ impl<'a> Resolver<'a> {
             }
         }
 
+        ident.ctxt = ident.ctxt.modern();
         let mut search_module = self.current_module;
         loop {
             self.get_traits_in_module_containing_item(ident, ns, search_module, &mut found_traits);
-            match search_module.kind {
-                ModuleKind::Block(..) => search_module = search_module.parent.unwrap(),
-                _ => break,
-            }
+            search_module =
+                unwrap_or!(self.hygienic_lexical_parent(search_module, &mut ident.ctxt), break);
         }
 
         if let Some(prelude) = self.prelude {
@@ -3100,7 +3186,11 @@ impl<'a> Resolver<'a> {
 
         for &(trait_name, binding) in traits.as_ref().unwrap().iter() {
             let module = binding.module().unwrap();
-            if self.resolve_ident_in_module(module, ident, ns, false, None).is_ok() {
+            let mut ident = ident;
+            if ident.ctxt.glob_adjust(module.expansion, binding.span.ctxt.modern()).is_none() {
+                continue
+            }
+            if self.resolve_ident_in_module_unadjusted(module, ident, ns, false, None).is_ok() {
                 let import_id = match binding.kind {
                     NameBindingKind::Import { directive, .. } => {
                         self.maybe_unused_trait_imports.insert(directive.id);

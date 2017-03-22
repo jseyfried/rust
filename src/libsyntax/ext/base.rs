@@ -530,12 +530,15 @@ pub enum SyntaxExtension {
 
     /// An attribute-like procedural macro that derives a builtin trait.
     BuiltinDerive(BuiltinDeriveFn),
+
+    DeclMacro(Box<TTMacroExpander>, Option<Span>),
 }
 
 impl SyntaxExtension {
     /// Return which kind of macro calls this syntax extension.
     pub fn kind(&self) -> MacroKind {
         match *self {
+            SyntaxExtension::DeclMacro(..) |
             SyntaxExtension::NormalTT(..) |
             SyntaxExtension::IdentTT(..) |
             SyntaxExtension::ProcMacro(..) =>
@@ -547,6 +550,13 @@ impl SyntaxExtension {
             SyntaxExtension::ProcMacroDerive(..) |
             SyntaxExtension::BuiltinDerive(..) =>
                 MacroKind::Derive,
+        }
+    }
+
+    pub fn is_modern(&self) -> bool {
+        match *self {
+            SyntaxExtension::DeclMacro(..) => true,
+            _ => false,
         }
     }
 }
