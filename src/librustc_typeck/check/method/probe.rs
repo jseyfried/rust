@@ -504,9 +504,12 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
                 continue
             }
 
-            if !self.tcx.vis_is_accessible_from(item.vis, self.body_id) {
-                self.private_candidate = Some(item.def());
-                continue
+            if let LookingFor::MethodName(name) = self.looking_for {
+                let def_scope = self.tcx.adjust(name, impl_def_id, self.body_id).1;
+                if !item.vis.is_accessible_from(def_scope, self.tcx) {
+                    self.private_candidate = Some(item.def());
+                    continue
+                }
             }
 
             let (impl_ty, impl_substs) = self.impl_ty_and_substs(impl_def_id);

@@ -341,7 +341,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         self.tcx.check_stability(def.def_id(), expr_id, span);
 
         if let probe::InherentImplPick = pick.kind {
-            if !self.tcx.vis_is_accessible_from(pick.item.vis, self.body_id) {
+            let def_scope = self.tcx.adjust(method_name, pick.item.container.id(), self.body_id).1;
+            if !pick.item.vis.is_accessible_from(def_scope, self.tcx) {
                 let msg = format!("{} `{}` is private", def.kind_name(), method_name);
                 self.tcx.sess.span_err(span, &msg);
             }
@@ -353,6 +354,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
     /// and return it, or `None`, if no such item was defined there.
     pub fn associated_item(&self, def_id: DefId, item_name: ast::Name)
                            -> Option<ty::AssociatedItem> {
-        self.tcx.associated_items(def_id).find(|item| item.name == item_name)
+        let ident = self.tcx.adjust(item_name, def_id, self.body_id).0;
+        self.tcx.associated_items(def_id).find(|item| item.name.to_ident() == ident)
     }
 }

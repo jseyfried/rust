@@ -47,7 +47,7 @@ use hir::def_id::{DefIndex, DefId, CRATE_DEF_INDEX};
 use hir::def::{Def, PathResolution};
 use rustc_data_structures::indexed_vec::IndexVec;
 use session::Session;
-use util::nodemap::{DefIdMap, NodeMap};
+use util::nodemap::{DefIdMap, FxHashMap, NodeMap};
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -77,6 +77,7 @@ pub struct LoweringContext<'a> {
     // a definition, then we can properly create the def id.
     parent_def: Option<DefIndex>,
     resolver: &'a mut Resolver,
+    name_map: FxHashMap<Ident, Name>,
 
     /// The items being lowered are collected here.
     items: BTreeMap<NodeId, hir::Item>,
@@ -126,6 +127,7 @@ pub fn lower_crate(sess: &Session,
         sess: sess,
         parent_def: None,
         resolver: resolver,
+        name_map: FxHashMap(),
         items: BTreeMap::new(),
         trait_items: BTreeMap::new(),
         impl_items: BTreeMap::new(),
@@ -495,8 +497,16 @@ impl<'a> LoweringContext<'a> {
         }
     }
 
+    fn lower_ident(&mut self, ident: Ident) -> Name {
+        let ident = ident.unhygienize();
+        if ident.ctxt == SyntaxContext::empty() {
+            return ident.name;
+        }
+        *self.name_map.entry(ident).or_insert_with(|| Symbol::from_ident(ident))
+    }
+
     fn lower_opt_sp_ident(&mut self, o_id: Option<Spanned<Ident>>) -> Option<Spanned<Name>> {
-        o_id.map(|sp_ident| respan(sp_ident.span, sp_ident.node.name))
+        o_id.map(|sp_ident| respan(sp_ident.span, self.lower_ident(sp_ident.node)))
     }
 
     fn lower_loop_destination(&mut self, destination: Option<(NodeId, Spanned<Ident>)>)
@@ -546,7 +556,7 @@ impl<'a> LoweringContext<'a> {
     fn lower_ty_binding(&mut self, b: &TypeBinding) -> hir::TypeBinding {
         hir::TypeBinding {
             id: self.lower_node_id(b.id),
-            name: b.ident.name,
+            name: self.lower_ident(b.ident),
             ty: self.lower_ty(&b.ty),
             span: b.span,
         }
@@ -648,7 +658,7 @@ impl<'a> LoweringContext<'a> {
     fn lower_variant(&mut self, v: &Variant) -> hir::Variant {
         Spanned {
             node: hir::Variant_ {
-                name: v.node.name.name,
+                name: self.lower_ident(v.node.name),
                 attrs: self.lower_attrs(&v.node.attrs),
                 data: self.lower_variant_data(&v.node.data),
                 disr_expr: v.node.disr_expr.as_ref().map(|e| {
@@ -836,7 +846,7 @@ impl<'a> LoweringContext<'a> {
         }
 
         hir::PathSegment {
-            name: segment.identifier.name,
+            name: self.lower_ident(segment.identifier),
             parameters: parameters,
         }
     }
@@ -895,7 +905,7 @@ impl<'a> LoweringContext<'a> {
         decl.inputs.iter().map(|arg| {
             match arg.pat.node {
                 PatKind::Ident(_, ident, None) => {
-                    respan(ident.span, ident.node.name)
+                    respan(ident.span, self.lower_ident(ident.node))
                 }
                 _ => respan(arg.pat.span, keywords::Invalid.name()),
             }
@@ -926,7 +936,7 @@ impl<'a> LoweringContext<'a> {
     }
 
     fn lower_ty_param(&mut self, tp: &TyParam, add_bounds: &[TyParamBound]) -> hir::TyParam {
-        let mut name = tp.ident.name;
+        let mut name = self.lower_ident(tp.ident);
 
         // Don't expose `Self` (recovered "keyword used as ident" parse error).
         // `rustc::ty` expects `Self` to be only used for a trait's `Self`.
@@ -1122,7 +1132,11 @@ impl<'a> LoweringContext<'a> {
         hir::StructField {
             span: f.span,
             id: self.lower_node_id(f.id),
-            name: f.ident.map(|ident| ident.name).unwrap_or(Symbol::intern(&index.to_string())),
+            name: self.lower_ident(match f.ident {
+                Some(ident) => ident,
+                // FIXME(jseyfried) positional field hygiene
+                None => Ident { name: Symbol::intern(&index.to_string()), ctxt: f.span.ctxt },
+            }),
             vis: self.lower_visibility(&f.vis, None),
             ty: self.lower_ty(&f.ty),
             attrs: self.lower_attrs(&f.attrs),
@@ -1131,7 +1145,7 @@ impl<'a> LoweringContext<'a> {
 
     fn lower_field(&mut self, f: &Field) -> hir::Field {
         hir::Field {
-            name: respan(f.ident.span, f.ident.node.name),
+            name: respan(f.ident.span, self.lower_ident(f.ident.node)),
             expr: P(self.lower_expr(&f.expr)),
             span: f.span,
             is_shorthand: f.is_shorthand,
@@ -1222,9 +1236,10 @@ impl<'a> LoweringContext<'a> {
                                     }
                                 };
 
+                                let name = this.lower_ident(import.rename.unwrap_or(ident));
                                 this.items.insert(import.id, hir::Item {
                                     id: import.id,
-                                    name: import.rename.unwrap_or(ident).name,
+                                    name: name,
                                     attrs: attrs.clone(),
                                     node: hir::ItemUse(P(path), hir::UseKind::Single),
                                     vis: vis,
@@ -1238,7 +1253,7 @@ impl<'a> LoweringContext<'a> {
                 let path = P(self.lower_path(id, path, ParamMode::Explicit, true));
                 let kind = match view_path.node {
                     ViewPathSimple(ident, _) => {
-                        *name = ident.name;
+                        *name = self.lower_ident(ident);
                         hir::UseKind::Single
                     }
                     ViewPathGlob(_) => {
@@ -1345,7 +1360,7 @@ impl<'a> LoweringContext<'a> {
         self.with_parent_def(i.id, |this| {
             hir::TraitItem {
                 id: this.lower_node_id(i.id),
-                name: i.ident.name,
+                name: this.lower_ident(i.ident),
                 attrs: this.lower_attrs(&i.attrs),
                 node: match i.node {
                     TraitItemKind::Const(ref ty, ref default) => {
@@ -1395,7 +1410,7 @@ impl<'a> LoweringContext<'a> {
         };
         hir::TraitItemRef {
             id: hir::TraitItemId { node_id: i.id },
-            name: i.ident.name,
+            name: self.lower_ident(i.ident),
             span: i.span,
             defaultness: self.lower_defaultness(Defaultness::Default, has_default),
             kind: kind,
@@ -1406,7 +1421,7 @@ impl<'a> LoweringContext<'a> {
         self.with_parent_def(i.id, |this| {
             hir::ImplItem {
                 id: this.lower_node_id(i.id),
-                name: i.ident.name,
+                name: this.lower_ident(i.ident),
                 attrs: this.lower_attrs(&i.attrs),
                 vis: this.lower_visibility(&i.vis, None),
                 defaultness: this.lower_defaultness(i.defaultness, true /* [1] */),
@@ -1435,7 +1450,7 @@ impl<'a> LoweringContext<'a> {
     fn lower_impl_item_ref(&mut self, i: &ImplItem) -> hir::ImplItemRef {
         hir::ImplItemRef {
             id: hir::ImplItemId { node_id: i.id },
-            name: i.ident.name,
+            name: self.lower_ident(i.ident),
             span: i.span,
             vis: self.lower_visibility(&i.vis, Some(i.id)),
             defaultness: self.lower_defaultness(i.defaultness, true /* [1] */),
@@ -1474,7 +1489,7 @@ impl<'a> LoweringContext<'a> {
     }
 
     pub fn lower_item(&mut self, i: &Item) -> Option<hir::Item> {
-        let mut name = i.ident.name;
+        let mut name = self.lower_ident(i.ident);
         let attrs = self.lower_attrs(&i.attrs);
         if let ItemKind::MacroDef(ref def) = i.node {
             if !def.legacy || i.attrs.iter().any(|attr| attr.path == "macro_export") {
@@ -1505,7 +1520,7 @@ impl<'a> LoweringContext<'a> {
         self.with_parent_def(i.id, |this| {
             hir::ForeignItem {
                 id: this.lower_node_id(i.id),
-                name: i.ident.name,
+                name: this.lower_ident(i.ident),
                 attrs: this.lower_attrs(&i.attrs),
                 node: match i.node {
                     ForeignItemKind::Fn(ref fdec, ref generics) => {
@@ -1594,9 +1609,10 @@ impl<'a> LoweringContext<'a> {
                                 let def_id = def.map(|d| d.def_id()).unwrap_or_else(|| {
                                     this.resolver.definitions().local_def_id(p.id)
                                 });
+                                let name = this.lower_ident(pth1.node);
                                 hir::PatKind::Binding(this.lower_binding_mode(binding_mode),
                                                       def_id,
-                                                      respan(pth1.span, pth1.node.name),
+                                                      respan(pth1.span, name),
                                                       sub.as_ref().map(|x| this.lower_pat(x)))
                             }
                             Some(def) => {
@@ -1629,7 +1645,7 @@ impl<'a> LoweringContext<'a> {
                                        Spanned {
                                            span: f.span,
                                            node: hir::FieldPat {
-                                               name: f.node.ident.name,
+                                               name: self.lower_ident(f.node.ident),
                                                pat: self.lower_pat(&f.node.pat),
                                                is_shorthand: f.node.is_shorthand,
                                            },
@@ -1799,7 +1815,7 @@ impl<'a> LoweringContext<'a> {
             ExprKind::MethodCall(i, ref tps, ref args) => {
                 let tps = tps.iter().map(|x| self.lower_ty(x)).collect();
                 let args = args.iter().map(|x| self.lower_expr(x)).collect();
-                hir::ExprMethodCall(respan(i.span, i.node.name), tps, args)
+                hir::ExprMethodCall(respan(i.span, self.lower_ident(i.node)), tps, args)
             }
             ExprKind::Binary(binop, ref lhs, ref rhs) => {
                 let binop = self.lower_binop(binop);
@@ -1895,7 +1911,8 @@ impl<'a> LoweringContext<'a> {
                                   P(self.lower_expr(er)))
             }
             ExprKind::Field(ref el, ident) => {
-                hir::ExprField(P(self.lower_expr(el)), respan(ident.span, ident.node.name))
+                hir::ExprField(P(self.lower_expr(el)),
+                               respan(ident.span, self.lower_ident(ident.node)))
             }
             ExprKind::TupField(ref el, ident) => {
                 hir::ExprTupField(P(self.lower_expr(el)), ident)
@@ -2715,10 +2732,8 @@ impl<'a> LoweringContext<'a> {
         let def_id = {
             let defs = self.resolver.definitions();
             let def_path_data = DefPathData::Binding(name.as_str());
-            let def_index = defs.create_def_with_parent(parent_def,
-                                                        id,
-                                                        def_path_data,
-                                                        REGULAR_SPACE);
+            let def_index = defs
+                .create_def_with_parent(parent_def, id, def_path_data, REGULAR_SPACE, Mark::root());
             DefId::local(def_index)
         };
 

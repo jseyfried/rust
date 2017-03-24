@@ -1316,7 +1316,7 @@ impl<'a> Resolver<'a> {
         module_map.insert(DefId::local(CRATE_DEF_INDEX), graph_root);
 
         let mut definitions = Definitions::new();
-        DefCollector::new(&mut definitions).collect_root();
+        DefCollector::new(&mut definitions, Mark::root()).collect_root();
 
         let mut invocations = FxHashMap();
         invocations.insert(Mark::root(),
