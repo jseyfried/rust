@@ -28,7 +28,6 @@ use std::mem::replace;
 use syntax::ast;
 use syntax::attr;
 use syntax::ptr::P;
-use syntax::symbol::keywords;
 use syntax_pos::Span;
 use errors::DiagnosticBuilder;
 use util::nodemap::{NodeMap, NodeSet, FxHashSet, FxHashMap, DefIdMap};
@@ -434,7 +433,7 @@ impl<'a, 'tcx> Visitor<'tcx> for LifetimeContext<'a, 'tcx> {
             self.resolve_elided_lifetimes(slice::ref_slice(lifetime_ref));
             return;
         }
-        if lifetime_ref.name == keywords::StaticLifetime.name() {
+        if lifetime_ref.name == "'static" {
             self.insert_lifetime(lifetime_ref, Region::Static);
             return;
         }
@@ -748,7 +747,7 @@ fn object_lifetime_defaults_for_item(hir_map: &Map, generics: &hir::Generics)
         match set {
             Set1::Empty => Set1::Empty,
             Set1::One(name) => {
-                if name == keywords::StaticLifetime.name() {
+                if name == "'static" {
                     Set1::One(Region::Static)
                 } else {
                     generics.lifetimes.iter().enumerate().find(|&(_, def)| {
@@ -1434,7 +1433,7 @@ impl<'a, 'tcx> LifetimeContext<'a, 'tcx> {
             let lifetime_i = &lifetimes[i];
 
             for lifetime in lifetimes {
-                if lifetime.lifetime.name == keywords::StaticLifetime.name() {
+                if lifetime.lifetime.name == "'static" {
                     let lifetime = lifetime.lifetime;
                     let mut err = struct_span_err!(self.sess, lifetime.span, E0262,
                                   "invalid lifetime parameter name: `{}`", lifetime.name);
