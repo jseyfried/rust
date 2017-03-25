@@ -28,7 +28,7 @@ extern crate syntax_pos;
 use rustc::dep_graph::DepNode;
 use rustc::hir::{self, PatKind};
 use rustc::hir::def::{self, Def};
-use rustc::hir::def_id::{CRATE_DEF_INDEX, DefId};
+use rustc::hir::def_id::DefId;
 use rustc::hir::intravisit::{self, Visitor, NestedVisitorMap};
 use rustc::hir::itemlikevisit::DeepVisitor;
 use rustc::hir::pat_util::EnumerateAndAdjustIterator;
@@ -37,7 +37,8 @@ use rustc::middle::privacy::{AccessLevel, AccessLevels};
 use rustc::ty::{self, TyCtxt, Ty, TypeFoldable};
 use rustc::ty::fold::TypeVisitor;
 use rustc::util::nodemap::NodeSet;
-use syntax::ast;
+use syntax::ast::{self, Ident};
+use syntax::symbol::keywords;
 use syntax_pos::Span;
 
 use std::cmp;
@@ -337,7 +338,35 @@ impl<'a, 'tcx> Visitor<'tcx> for EmbargoVisitor<'a, 'tcx> {
     }
 
     fn visit_macro_def(&mut self, md: &'tcx hir::MacroDef) {
-        self.update(md.id, Some(AccessLevel::Public));
+        if md.legacy {
+            self.update(md.id, Some(AccessLevel::Public));
+            return
+        }
+
+        let module_did = ty::DefIdTree::parent(self.tcx, self.tcx.hir.local_def_id(md.id)).unwrap();
+        let mut module_id = self.tcx.hir.as_local_node_id(module_did).unwrap();
+        let level = if md.vis == hir::Public { self.get(module_id) } else { None };
+        let level = self.update(md.id, level);
+        if level.is_none() {
+            return
+        }
+
+        loop {
+            let module = if module_id == ast::CRATE_NODE_ID {
+                &self.tcx.hir.krate().module
+            } else if let hir::ItemMod(ref module) = self.tcx.hir.expect_item(module_id).node {
+                module
+            } else {
+                unreachable!()
+            };
+            for id in &module.item_ids {
+                self.update(id.id, level);
+            }
+            if module_id == ast::CRATE_NODE_ID {
+                break
+            }
+            module_id = self.tcx.hir.get_parent_node(module_id);
+        }
     }
 
     fn visit_ty(&mut self, ty: &'tcx hir::Ty) {
@@ -414,23 +443,27 @@ impl<'b, 'a, 'tcx> TypeVisitor<'tcx> for ReachEverythingInTheInterfaceVisitor<'b
 
 struct PrivacyVisitor<'a, 'tcx: 'a> {
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
-    curitem: DefId,
+    curitem: ast::NodeId,
     in_foreign: bool,
     tables: &'a ty::TypeckTables<'tcx>,
 }
 
 impl<'a, 'tcx> PrivacyVisitor<'a, 'tcx> {
-    fn item_is_accessible(&self, did: DefId) -> bool {
-        match self.tcx.hir.as_local_node_id(did) {
-            Some(node_id) =>
-                ty::Visibility::from_hir(&self.tcx.hir.expect_item(node_id).vis, node_id, self.tcx),
-            None => self.tcx.sess.cstore.visibility(did),
-        }.is_accessible_from(self.curitem, self.tcx)
+    fn item_is_accessible(&self, name: ast::Name, did: DefId) -> bool {
+        if let Some(node_id) = self.tcx.hir.as_local_node_id(did) {
+            let def_id = self.tcx.adjust(name, did, self.curitem).1;
+            let vis = &self.tcx.hir.expect_item(node_id).vis;
+            ty::Visibility::from_hir(vis, node_id, self.tcx).is_accessible_from(def_id, self.tcx)
+        } else {
+            self.tcx.sess.cstore.visibility(did) == ty::Visibility::Public
+        }
     }
 
     // Checks that a field is in scope.
     fn check_field(&mut self, span: Span, def: &'tcx ty::AdtDef, field: &'tcx ty::FieldDef) {
-        if !def.is_enum() && !field.vis.is_accessible_from(self.curitem, self.tcx) {
+        let ident = Ident { ctxt: span.ctxt.modern(), ..keywords::Invalid.ident() };
+        let def_id = self.tcx.adjust_ident(ident, def.did, self.curitem).1;
+        if !def.is_enum() && !field.vis.is_accessible_from(def_id, self.tcx) {
             struct_span_err!(self.tcx.sess, span, E0451, "field `{}` of {} `{}` is private",
                       field.name, def.variant_descr(), self.tcx.item_path_str(def.did))
                 .span_label(span, &format!("field `{}` is private", field.name))
@@ -439,11 +472,12 @@ impl<'a, 'tcx> PrivacyVisitor<'a, 'tcx> {
     }
 
     // Checks that a method is in scope.
-    fn check_method(&mut self, span: Span, method_def_id: DefId) {
+    fn check_method(&mut self, name: ast::
+Name, span: Span, method_def_id: DefId) {
         match self.tcx.associated_item(method_def_id).container {
             // Trait methods are always all public. The only controlling factor
             // is whether the trait itself is accessible or not.
-            ty::TraitContainer(trait_def_id) if !self.item_is_accessible(trait_def_id) => {
+            ty::TraitContainer(trait_def_id) if !self.item_is_accessible(name, trait_def_id) => {
                 let msg = format!("source trait `{}` is private",
                                   self.tcx.item_path_str(trait_def_id));
                 self.tcx.sess.span_err(span, &msg);
@@ -469,17 +503,17 @@ impl<'a, 'tcx> Visitor<'tcx> for PrivacyVisitor<'a, 'tcx> {
     }
 
     fn visit_item(&mut self, item: &'tcx hir::Item) {
-        let orig_curitem = replace(&mut self.curitem, self.tcx.hir.local_def_id(item.id));
+        let orig_curitem = replace(&mut self.curitem, item.id);
         intravisit::walk_item(self, item);
         self.curitem = orig_curitem;
     }
 
     fn visit_expr(&mut self, expr: &'tcx hir::Expr) {
         match expr.node {
-            hir::ExprMethodCall(..) => {
+            hir::ExprMethodCall(name, ..) => {
                 let method_call = ty::MethodCall::expr(expr.id);
                 let method = self.tables.method_map[&method_call];
-                self.check_method(expr.span, method.def_id);
+                self.check_method(name.node, expr.span, method.def_id);
             }
             hir::ExprStruct(ref qpath, ref expr_fields, _) => {
                 let def = self.tables.qpath_def(qpath, expr.id);
@@ -490,15 +524,17 @@ impl<'a, 'tcx> Visitor<'tcx> for PrivacyVisitor<'a, 'tcx> {
                 // (i.e. `all_fields - fields`), just check them all,
                 // unless the ADT is a union, then unmentioned fields
                 // are not checked.
-                if adt.is_union() {
-                    for expr_field in expr_fields {
-                        self.check_field(expr.span, adt, variant.field_named(expr_field.name.node));
-                    }
-                } else {
+                let mut checked_names = Vec::new();
+                for expr_field in expr_fields {
+                    let field = variant.field_named(expr_field.name.node);
+                    self.check_field(expr_field.span, adt, field);
+                    checked_names.push(field.name);
+                }
+                if !adt.is_union() {
                     for field in &variant.fields {
-                        let expr_field = expr_fields.iter().find(|f| f.name.node == field.name);
-                        let span = if let Some(f) = expr_field { f.span } else { expr.span };
-                        self.check_field(span, adt, field);
+                        if !checked_names.contains(&field.name) {
+                            self.check_field(expr.span, adt, field);
+                        }
                     }
                 }
             }
@@ -1213,7 +1249,7 @@ pub fn check_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
     // Use the parent map to check the privacy of everything
     let mut visitor = PrivacyVisitor {
-        curitem: DefId::local(CRATE_DEF_INDEX),
+        curitem: ast::CRATE_NODE_ID,
         in_foreign: false,
         tcx: tcx,
         tables: &ty::TypeckTables::empty(),
