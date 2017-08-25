@@ -402,7 +402,7 @@ impl<'a> Resolver<'a> {
         let ast::Path { ref segments, span } = *path;
         let path: Vec<_> = segments.iter().map(|seg| respan(seg.span, seg.identifier)).collect();
         let invocation = self.invocations[&scope];
-        self.current_module = invocation.module.get();
+        self.current_module = self.module_map[invocation.module.get().normal_ancestor_id];
 
         if path.len() > 1 {
             if !self.use_extern_macros && self.gated_errors.insert(span) {
