@@ -1771,8 +1771,17 @@ impl<'a> Resolver<'a> {
         result
     }
 
-    fn resolve_crate_root(&mut self, mut ctxt: SyntaxContext) -> Module<'a> {
-        let module = match ctxt.adjust(Mark::root()) {
+    fn resolve_crate_root(&mut self, mut ctxt: SyntaxContext, legacy: bool) -> Module<'a> {
+        let mark = if legacy {
+            // When resolving `$crate` from a `macro_rules!` invoked in a `macro`,
+            // we don't want to pretend that the `macro_rules!` definition is in the `macro`
+            // as described in `SyntaxContext::apply_mark`, so we ignore prepended modern marks.
+            ctxt.marks().into_iter().find(|&mark| !mark.is_modern())
+        } else {
+            ctxt = ctxt.modern();
+            ctxt.adjust(Mark::root())
+        };
+        let module = match mark {
             Some(def) => self.macro_def_scope(def),
             None => return self.graph_root,
         };
@@ -2957,11 +2966,11 @@ impl<'a> Resolver<'a> {
                    (i == 1 && name == keywords::Crate.name() &&
                               path[0].node.name == keywords::CrateRoot.name()) {
                     // `::a::b` or `::crate::a::b`
-                    module = Some(self.resolve_crate_root(ident.node.ctxt.modern()));
+                    module = Some(self.resolve_crate_root(ident.node.ctxt, false));
                     continue
                 } else if i == 0 && name == keywords::DollarCrate.name() {
                     // `$crate::a::b`
-                    module = Some(self.resolve_crate_root(ident.node.ctxt));
+                    module = Some(self.resolve_crate_root(ident.node.ctxt, true));
                     continue
                 }
             }
