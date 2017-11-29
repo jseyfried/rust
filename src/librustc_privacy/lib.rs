@@ -326,12 +326,15 @@ impl<'a, 'tcx> Visitor<'tcx> for EmbargoVisitor<'a, 'tcx> {
     fn visit_mod(&mut self, m: &'tcx hir::Mod, _sp: Span, id: ast::NodeId) {
         // This code is here instead of in visit_item so that the
         // crate module gets processed as well.
-        if self.prev_level.is_some() {
+        if let Some(prev_level) = self.prev_level {
             let def_id = self.tcx.hir.local_def_id(id);
             if let Some(exports) = self.tcx.module_exports(def_id) {
                 for export in exports.iter() {
                     if let Some(node_id) = self.tcx.hir.as_local_node_id(export.def.def_id()) {
-                        self.update(node_id, Some(AccessLevel::Exported));
+                        // `pub` items inherit levels from parents
+                        if export.vis == ty::Visibility::Public {
+                            self.update(node_id, Some(prev_level));
+                        }
                     }
                 }
             }
@@ -365,6 +368,15 @@ impl<'a, 'tcx> Visitor<'tcx> for EmbargoVisitor<'a, 'tcx> {
             for id in &module.item_ids {
                 self.update(id.id, level);
             }
+            let def_id = self.tcx.hir.local_def_id(module_id);
+            if let Some(exports) = self.tcx.module_exports(def_id) {
+                for export in exports.iter() {
+                    if let Some(node_id) = self.tcx.hir.as_local_node_id(export.def.def_id()) {
+                        self.update(node_id, level);
+                    }
+                }
+            }
+
             if module_id == ast::CRATE_NODE_ID {
                 break
             }
