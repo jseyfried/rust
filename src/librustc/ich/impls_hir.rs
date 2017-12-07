@@ -1162,7 +1162,9 @@ for hir::def_id::DefIndex {
 impl_stable_hash_for!(struct hir::def::Export {
     ident,
     def,
-    span
+    vis,
+    span,
+    is_import
 });
 
 impl<'gcx> HashStable<StableHashingContext<'gcx>>

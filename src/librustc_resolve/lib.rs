@@ -1108,7 +1108,11 @@ impl<'a> NameBinding<'a> {
 
     // We sometimes need to treat variants as `pub` for backwards compatibility
     fn pseudo_vis(&self) -> ty::Visibility {
-        if self.is_variant() { ty::Visibility::Public } else { self.vis }
+        if self.is_variant() && self.def().def_id().is_local() {
+            ty::Visibility::Public
+        } else {
+            self.vis
+        }
     }
 
     fn is_variant(&self) -> bool {
@@ -1773,8 +1777,17 @@ impl<'a> Resolver<'a> {
         result
     }
 
-    fn resolve_crate_root(&mut self, mut ctxt: SyntaxContext) -> Module<'a> {
-        let module = match ctxt.adjust(Mark::root()) {
+    fn resolve_crate_root(&mut self, mut ctxt: SyntaxContext, legacy: bool) -> Module<'a> {
+        let mark = if legacy {
+            // When resolving `$crate` from a `macro_rules!` invoked in a `macro`,
+            // we don't want to pretend that the `macro_rules!` definition is in the `macro`
+            // as described in `SyntaxContext::apply_mark`, so we ignore prepended modern marks.
+            ctxt.marks().into_iter().find(|&mark| !mark.is_modern())
+        } else {
+            ctxt = ctxt.modern();
+            ctxt.adjust(Mark::root())
+        };
+        let module = match mark {
             Some(def) => self.macro_def_scope(def),
             None => return self.graph_root,
         };
@@ -2959,11 +2972,11 @@ impl<'a> Resolver<'a> {
                    (i == 1 && name == keywords::Crate.name() &&
                               path[0].node.name == keywords::CrateRoot.name()) {
                     // `::a::b` or `::crate::a::b`
-                    module = Some(self.resolve_crate_root(ident.node.ctxt.modern()));
+                    module = Some(self.resolve_crate_root(ident.node.ctxt, false));
                     continue
                 } else if i == 0 && name == keywords::DollarCrate.name() {
                     // `$crate::a::b`
-                    module = Some(self.resolve_crate_root(ident.node.ctxt));
+                    module = Some(self.resolve_crate_root(ident.node.ctxt, true));
                     continue
                 }
             }
@@ -3608,9 +3621,9 @@ impl<'a> Resolver<'a> {
             self.populate_module_if_necessary(in_module);
 
             in_module.for_each_child_stable(|ident, _, name_binding| {
-                // abort if the module is already found
-                if let Some(_) = result {
-                    return ();
+                // abort if the module is already found or if name_binding is private external
+                if result.is_some() || !name_binding.vis.is_visible_locally() {
+                    return
                 }
                 if let Some(module) = name_binding.module() {
                     // form the path
