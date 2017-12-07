@@ -13,7 +13,7 @@
 #[macro_export]
 macro_rules! m {
     () => {
-        f(); // (1)
-        fn g() {} // (2)
+        fn f() {} // (2)
+        g(); // (1)
     }
 }

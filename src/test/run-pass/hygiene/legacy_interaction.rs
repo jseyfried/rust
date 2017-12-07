@@ -20,23 +20,31 @@ extern crate legacy_interaction;
 // ```rust
 //  macro_rules! m {
 //     () => {
-//         f() // (1)
-//         fn g() {} // (2)
+//         fn f() // (1)
+//         g() // (2)
 //     }
 // }
 // ```rust
 
 mod def_site {
-    // Unless this macro opts out of hygiene, it shouldn't matter where it is invoked.
+    // Unless this macro opts out of hygiene, it should resolve the same wherever it is invoked.
     pub macro m2() {
         ::legacy_interaction::m!();
-        fn f() {} // We want (1) resolve to this, not to (3)
-        g(); // We want this to resolve to (2)
+        f(); // This should resolve to (1)
+        fn g() {} // We want (2) resolve to this, not to (4)
     }
 }
 
 mod use_site {
-    fn test() { ::def_site::m2!(); }
+    fn test() {
+        fn f() -> bool { true } // (3)
+        fn g() -> bool { true } // (4)
+
+        ::def_site::m2!();
+
+        let _: bool = f(); // This should resolve to (3)
+        let _: bool = g(); // This should resolve to (4)
+    }
 }
 
 fn main() {}
